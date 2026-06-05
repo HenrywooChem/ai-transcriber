@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Transcriber - 智能转录助手</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 25px;
+            border-bottom: 2px solid #eee;
+        }
+        .tab-btn {
+            padding: 12px 24px;
+            border: none;
+            background: none;
+            font-size: 16px;
+            cursor: pointer;
+            color: #666;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.3s;
+        }
+        .tab-btn.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+            font-weight: 600;
+        }
+        .input-group {
+            margin-bottom: 20px;
+        }
+        .input-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+        }
+        .input-group input[type="text"],
+        .input-group input[type="file"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        .input-group input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .btn {
+            padding: 12px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .task-list {
+            margin-top: 30px;
+        }
+        .task-item {
+            padding: 20px;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            margin-bottom: 15px;
+            transition: all 0.3s;
+        }
+        .task-item:hover {
+            border-color: #667eea;
+        }
+        .task-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .task-id {
+            font-weight: 600;
+            color: #667eea;
+        }
+        .task-status {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .status-pending { background: #fff3cd; color: #856404; }
+        .status-downloading { background: #cce5ff; color: #004085; }
+        .status-transcribing { background: #cce5ff; color: #004085; }
+        .status-correcting { background: #cce5ff; color: #004085; }
+        .status-completed { background: #d4edda; color: #155724; }
+        .status-error { background: #f8d7da; color: #721c24; }
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.3s;
+        }
+        .result-section {
+            margin-top: 15px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        .result-section h4 {
+            margin-bottom: 10px;
+            color: #333;
+        }
+        .result-text {
+            white-space: pre-wrap;
+            line-height: 1.6;
+            color: #555;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="container">
+            <div class="header">
+                <h1>🎤 AI Transcriber</h1>
+                <p>智能转录助手 - 视频/音频转文字 + AI纠错总结</p>
+            </div>
+
+            <div class="card">
+                <div class="tabs">
+                    <button class="tab-btn" :class="{active: activeTab === 'url'}" @click="activeTab = 'url'">
+                        🔗 链接转录
+                    </button>
+                    <button class="tab-btn" :class="{active: activeTab === 'file'}" @click="activeTab = 'file'">
+                        📁 文件上传
+                    </button>
+                    <button class="tab-btn" :class="{active: activeTab === 'tasks'}" @click="activeTab = 'tasks'">
+                        📋 任务列表
+                    </button>
+                </div>
+
+                <!-- 链接转录 -->
+                <div v-show="activeTab === 'url'">
+                    <div class="input-group">
+                        <label>输入B站/YouTube链接</label>
+                        <input 
+                            type="text" 
+                            v-model="videoUrl" 
+                            placeholder="https://www.bilibili.com/video/BV... 或 https://www.youtube.com/watch?v=..."
+                            @keyup.enter="submitUrl"
+                        >
+                    </div>
+                    <button class="btn" @click="submitUrl" :disabled="!videoUrl || loading">
+                        {{ loading ? '提交中...' : '开始转录' }}
+                    </button>
+                </div>
+
+                <!-- 文件上传 -->
+                <div v-show="activeTab === 'file'">
+                    <div class="input-group">
+                        <label>选择音频/视频文件</label>
+                        <input 
+                            type="file" 
+                            @change="handleFileSelect"
+                            accept="audio/*,video/*"
+                        >
+                    </div>
+                    <div v-if="selectedFile" style="margin-bottom: 15px; color: #666;">
+                        已选择: {{ selectedFile.name }}
+                    </div>
+                    <button class="btn" @click="submitFile" :disabled="!selectedFile || loading">
+                        {{ loading ? '上传中...' : '开始转录' }}
+                    </button>
+                </div>
+
+                <!-- 任务列表 -->
+                <div v-show="activeTab === 'tasks'">
+                    <div v-if="tasks.length === 0" class="empty-state">
+                        <div class="empty-state-icon">📭</div>
+                        <p>暂无任务</p>
+                    </div>
+                    <div v-else>
+                        <div class="task-item" v-for="task in tasks" :key="task.id">
+                            <div class="task-header">
+                                <span class="task-id">任务 #{{ task.id.slice(0, 8) }}</span>
+                                <span class="task-status" :class="'status-' + task.status">
+                                    {{ statusText(task.status) }}
+                                </span>
+                            </div>
+                            <div class="progress-bar">
+                                <div class="progress-fill" :style="{width: task.progress + '%'}"></div>
+                            </div>
+                            <div style="font-size: 12px; color: #999; margin-top: 5px;">
+                                进度: {{ task.progress }}%
+                            </div>
+                            <div v-if="task.error_msg" style="color: #dc3545; margin-top: 10px;">
+                                错误: {{ task.error_msg }}
+                            </div>
+                            <div v-if="task.status === 'completed'" style="margin-top: 15px;">
+                                <button class="btn" @click="viewResult(task.id)" style="padding: 8px 16px; font-size: 14px;">
+                                    查看完整结果
+                                </button>
+                                <div v-if="task.summary" class="result-section">
+                                    <h4>📝 AI摘要</h4>
+                                    <div class="result-text">{{ task.summary }}</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted } = Vue;
+
+        createApp({
+            setup() {
+                const activeTab = ref('url');
+                const videoUrl = ref('');
+                const selectedFile = ref(null);
+                const loading = ref(false);
+                const tasks = ref([]);
+                let pollTimer = null;
+
+                const API_BASE = 'http://localhost:8001/api';
+
+                async function submitUrl() {
+                    if (!videoUrl.value) return;
+                    loading.value = true;
+                    try {
+                        const formData = new FormData();
+                        formData.append('url', videoUrl.value);
+                        const resp = await fetch(`${API_BASE}/transcribe/url`, {
+                            method: 'POST',
+                            body: formData,
+                        });
+                        const data = await resp.json();
+                        videoUrl.value = '';
+                        activeTab.value = 'tasks';
+                        await loadTasks();
+                        startPolling();
+                        alert('任务已创建！');
+                    } catch (e) {
+                        alert('提交失败: ' + e.message);
+                    } finally {
+                        loading.value = false;
+                    }
+                }
+
+                async function handleFileSelect(e) {
+                    selectedFile.value = e.target.files[0];
+                }
+
+                async function submitFile() {
+                    if (!selectedFile.value) return;
+                    loading.value = true;
+                    try {
+                        const formData = new FormData();
+                        formData.append('file', selectedFile.value);
+                        const resp = await fetch(`${API_BASE}/transcribe/upload`, {
+                            method: 'POST',
+                            body: formData,
+                        });
+                        const data = await resp.json();
+                        selectedFile.value = null;
+                        activeTab.value = 'tasks';
+                        await loadTasks();
+                        startPolling();
+                        alert('任务已创建！');
+                    } catch (e) {
+                        alert('上传失败: ' + e.message);
+                    } finally {
+                        loading.value = false;
+                    }
+                }
+
+                async function loadTasks() {
+                    try {
+                        const resp = await fetch(`${API_BASE}/tasks`);
+                        const data = await resp.json();
+                        tasks.value = data.tasks.reverse();
+                    } catch (e) {
+                        console.error('加载任务失败:', e);
+                    }
+                }
+
+                function startPolling() {
+                    if (pollTimer) clearInterval(pollTimer);
+                    pollTimer = setInterval(async () => {
+                        await loadTasks();
+                        const hasRunning = tasks.value.some(t => 
+                            ['pending', 'downloading', 'transcribing', 'correcting'].includes(t.status)
+                        );
+                        if (!hasRunning) {
+                            clearInterval(pollTimer);
+                        }
+                    }, 3000);
+                }
+
+                function statusText(status) {
+                    const map = {
+                        'pending': '等待中',
+                        'downloading': '下载中',
+                        'transcribing': '转录中',
+                        'correcting': 'AI处理中',
+                        'completed': '已完成',
+                        'error': '失败',
+                    };
+                    return map[status] || status;
+                }
+
+                async function viewResult(taskId) {
+                    window.open(`${API_BASE.replace('/api', '')}/outputs/${taskId}.txt`);
+                }
+
+                onMounted(() => {
+                    loadTasks();
+                });
+
+                return {
+                    activeTab,
+                    videoUrl,
+                    selectedFile,
+                    loading,
+                    tasks,
+                    submitUrl,
+                    handleFileSelect,
+                    submitFile,
+                    statusText,
+                    viewResult,
+                };
+            },
+        }).mount('#app');
+    </script>
+</body>
+</html>
