@@ -4,6 +4,7 @@
 """
 import os, json, time, uuid, asyncio, shutil
 from pathlib import Path
+import sys
 import hashlib, base64, secrets, sqlite3
 import jwt
 from datetime import datetime, timedelta
@@ -41,6 +42,11 @@ for d in [UPLOAD_DIR, RESULTS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="视频转录服务", version="1.0.0")
+
+# 确保 .venv 的 site-packages 在 Python 路径中
+_venv_site = Path(__file__).parent.parent / ".venv" / "lib" / "python3.11" / "site-packages"
+if _venv_site.exists() and str(_venv_site) not in sys.path:
+    sys.path.insert(0, str(_venv_site))
 
 # 挂载静态文件（CSS/JS）
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -348,10 +354,10 @@ async def llm_process(transcript: dict) -> dict:
 
 async def download_audio(url: str, output_dir: Path) -> Path:
     """通用视频音频下载
-    策略（层层降级）：
-    1. B站 → Camofox 专用提取（已实现，不走 yt-dlp）
-    2. 其他网站 → yt-dlp 试一次（YouTube/Twitter 等海外站无需 cookie）
-    3. yt-dlp 失败 → Camofox 通用页面提取（抖音/快手/小红书等国内站）
+    策略：
+    1. B站 → Camofox 专用提取
+    2. YouTube → yt-dlp 下载
+    3. 其他 → 提示不支持
     """
     url_lower = url.lower()
 
@@ -359,18 +365,19 @@ async def download_audio(url: str, output_dir: Path) -> Path:
     if "bilibili.com" in url_lower or "b23.tv" in url_lower:
         return await download_bilibili_via_camofox(url, output_dir)
 
-    # 非B站：先试 yt-dlp（免费、无 cookie 要求可下 YouTube/Twitter/微博等）
-    try:
-        return await download_youtube_via_ytdlp(url, output_dir)
-    except Exception:
-        pass  # yt-dlp 失败，走 Camofox 通用提取
+    # YouTube 走 yt-dlp
+    if "youtube.com" in url_lower or "youtu.be" in url_lower:
+        try:
+            return await download_youtube_via_ytdlp(url, output_dir)
+        except Exception as e:
+            raise HTTPException(400, f"YouTube 视频下载失败: {str(e)[:200]}")
 
-    # Camofox 通用提取（真实浏览器打开页面，提取 video 源）
-    try:
-        return await download_via_camofox_generic(url, output_dir)
-    except Exception as e:
-        raise HTTPException(400, f"无法下载此视频（已尝试 yt-dlp 和浏览器提取均失败）: {str(e)[:200]}")
-
+    # 其他网站不予支持
+    raise HTTPException(400,
+        "暂不支持该平台在线转录。\n"
+        "目前仅支持 B站 和 YouTube 的视频链接。\n"
+        "如需转录其他平台视频，请先下载到本地，再使用「上传文件」功能。"
+    )
 
 async def download_bilibili_via_camofox(url: str, output_dir: Path) -> Path:
     """通过 Camofox 浏览器下载 B站音频"""
@@ -566,98 +573,53 @@ async def download_via_camofox_generic(url: str, output_dir: Path) -> Path:
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{camofox_base}{path}",
                                     json=data or {},
-                                    timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    raise RuntimeError(f"Camofox API {path} 返回 {resp.status}: {text[:200]}")
-                return await resp.json()
-
-    async def _camofox_get(path: str) -> dict:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{camofox_base}{path}",
-                                   timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                                    timeout=aiohttp.ClientTimeout(total=60)) as resp:
                 if resp.status != 200:
                     text = await resp.text()
                     raise RuntimeError(f"Camofox API {path} 返回 {resp.status}: {text[:200]}")
                 return await resp.json()
 
     try:
-        # 1. 创建标签页（先打开目标网站首页建立 session）
-        domain = url.split("/")[2] if "://" in url else url.split("/")[0]
+        # 1. 直接打开目标 URL（不先打开域名首页，以支持 xhslink/b23 等短链接）
         tab_data = await _camofox_post("/tabs", {
             "userId": user_id,
             "sessionKey": f"gen_{uuid.uuid4().hex[:8]}",
-            "url": f"https://{domain}/"
+            "url": url
         })
         tab_id = tab_data.get("tabId")
         if not tab_id:
             raise RuntimeError("Camofox 创建标签页失败")
 
-        await asyncio.sleep(2)
+        # 2. 等待页面加载（动态页面需要更久）
+        await asyncio.sleep(8)
 
-        # 2. 导航到目标视频页
-        await _camofox_post(f"/tabs/{tab_id}/navigate", {
-            "userId": user_id,
-            "url": url
-        })
-
-        # 3. 等待页面加载（不同网站加载速度不同）
-        await asyncio.sleep(5)
-
-        # 4. 执行 JS 提取视频信息（多种策略）
-        js_extract = r"""
+        # 3. 检测是否为 blob URL，若是则尝试从 __INITIAL_STATE__ 提取真实地址
+        detect_js = """
         (function() {
-            var result = {};
+            var v = document.querySelector('video');
+            var r = { hasVideo: false, isBlob: false, src: '', title: document.title || '' };
 
-            // 策略1: 找 <video> 标签
-            var videos = document.querySelectorAll('video');
-            if (videos.length > 0) {
-                result.videoCount = videos.length;
-                result.videoSrc = videos[0].src || '';
-                // 检查 <source> 子元素
-                var sources = videos[0].querySelectorAll('source');
-                if (sources.length > 0) {
-                    result.sourceSrc = sources[0].src;
-                }
-                // 检查 currentSrc（浏览器已解析的最终地址）
-                result.currentSrc = videos[0].currentSrc || '';
-                // 检查 poster（封面，间接证明视频存在）
-                result.poster = videos[0].poster || '';
-            }
+            if (v) {
+                r.hasVideo = true;
+                r.src = v.src || '';
+                r.currentSrc = v.currentSrc || '';
+                r.isBlob = (v.src && v.src.indexOf('blob:') === 0) || (v.currentSrc && v.currentSrc.indexOf('blob:') === 0);
 
-            // 策略2: 取页面标题
-            result.title = document.title || '';
-
-            // 策略3: 在页面文本中搜索视频文件 URL
-            var html = (document.documentElement && document.documentElement.outerHTML) || '';
-            // 匹配 mp4 / m3u8 / webm
-            var foundUrls = [];
-            var patterns = [
-                /https?:\/\/[^\s\"'<>]+?\.(mp4|m3u8|webm|ts)(\?[^\s\"'<>]*)?/gi,
-                /https?:\/\/[^\s\"'<>]+?video[^\s\"'<>]*?\.(mp4|m3u8)/gi,
-                /https?:\/\/[^\s\"'<>]+?\/(play|videoplayback)[^\s\"'<>]*/gi
-            ];
-            for (var pi = 0; pi < patterns.length; pi++) {
-                var matches = html.match(patterns[pi]);
-                if (matches) {
-                    for (var mi = 0; mi < Math.min(matches.length, 5); mi++) {
-                        foundUrls.push(matches[mi]);
+                // 有 video 标签但 src 为空 → 找 source 子元素
+                if (!r.src && !r.currentSrc) {
+                    var sources = v.querySelectorAll('source');
+                    if (sources.length > 0) {
+                        r.src = sources[0].src || '';
                     }
                 }
             }
-            if (foundUrls.length > 0) {
-                result.foundVideoUrls = foundUrls;
-            }
-
-            return JSON.stringify(result);
+            return JSON.stringify(r);
         })()
         """
-
         exec_result = await _camofox_post(f"/tabs/{tab_id}/evaluate", {
             "userId": user_id,
-            "expression": js_extract
+            "expression": detect_js
         })
-
         result_text = exec_result.get("result", "")
         if not result_text or result_text == "undefined":
             raise RuntimeError("无法从页面提取视频信息（页面可能未加载完成）")
@@ -665,21 +627,102 @@ async def download_via_camofox_generic(url: str, output_dir: Path) -> Path:
         import json as _json
         page_info = _json.loads(result_text)
         title = page_info.get("title", "video")[:50]
+        video_url = page_info.get("currentSrc") or page_info.get("src") or ""
 
-        # 确定最佳视频源
-        video_url = (
-            page_info.get("currentSrc") or
-            page_info.get("videoSrc") or
-            page_info.get("sourceSrc") or
-            (page_info.get("foundVideoUrls") and page_info["foundVideoUrls"][0])
-        )
+        # 如果视频源是 blob，尝试从 __INITIAL_STATE__ 提取真实 URL
+        if page_info.get("isBlob") or (video_url and video_url.startswith("blob:")):
+            extract_real_js = r"""
+            (function() {
+                var r = {};
+
+                // 策略1: 找 __INITIAL_STATE__ 原始文本并用正则提取 video URL
+                var scripts = document.querySelectorAll('script');
+                for (var i = 0; i < scripts.length; i++) {
+                    var t = scripts[i].textContent || '';
+                    if (t.indexOf('__INITIAL_STATE__') > -1) {
+                        // 用正则从原始 JSON 文本中提取 masterUrl / url
+                        var masterMatch = t.match(/"masterUrl"\s*:\s*"([^"]+)"/);
+                        if (masterMatch && masterMatch[1]) {
+                            r.realUrl = masterMatch[1].replace(/\\u0026/g, '&');
+                            r.source = '__INITIAL_STATE__.regex_masterUrl';
+                            return JSON.stringify(r);
+                        }
+                        var urlMatch = t.match(/"url"\s*:\s*"((https?:|)[^"]+\.(mp4|m3u8)[^"]*)"/);
+                        if (urlMatch && urlMatch[1]) {
+                            r.realUrl = urlMatch[1].replace(/\\u0026/g, '&');
+                            r.source = '__INITIAL_STATE__.regex_url';
+                            return JSON.stringify(r);
+                        }
+                    }
+                }
+
+                // 策略2: 在页面 HTML 中搜索视频 URL
+                var html = document.documentElement.outerHTML || '';
+                var anyUrl = html.match(/https?:\\/\\/[^\\s\\"'<>]+?\\.(mp4|m3u8|webm)(\\?[^\\s\\"'<>]*)?/i);
+                if (anyUrl) {
+                    r.realUrl = anyUrl[0];
+                    r.source = 'html_regex';
+                    return JSON.stringify(r);
+                }
+
+                r.realUrl = '';
+                return JSON.stringify(r);
+            })()
+            """
+
+            exec_result2 = await _camofox_post(f"/tabs/{tab_id}/evaluate", {
+                "userId": user_id,
+                "expression": extract_real_js
+            })
+            rt2 = exec_result2.get("result", "")
+            if rt2 and rt2 != "undefined":
+                real_info = _json.loads(rt2)
+                if real_info.get("realUrl"):
+                    video_url = real_info["realUrl"]
+                    print(f"[Camofox] Extracted real URL from {real_info.get('source', 'unknown')}")
+
+        # 如果依然没有视频 URL，回退到在 HTML 中搜索
+        if not video_url:
+            html_search_js = """
+            (function() {
+                var html = document.documentElement.outerHTML || '';
+                var urls = [];
+                var patterns = [
+                    /https?:\\/\\/[^\\s\\"'<>]+?\\.(mp4|m3u8|webm|ts)(\\?[^\\s\\"'<>]*)?/gi,
+                    /https?:\\/\\/[^\\s\\"'<>]+?video[^\\s\\"'<>]*?\\.(mp4|m3u8)/gi,
+                    /https?:\\/\\/[-a-zA-Z0-9@:%._\\+~#=]{1,256}\\.(com|cn)[^\\s\\"'<>]*?\\.(mp4|m3u8)/gi
+                ];
+                for (var pi = 0; pi < patterns.length; pi++) {
+                    var matches = html.match(patterns[pi]);
+                    if (matches) {
+                        for (var mi = 0; mi < matches.length; mi++) {
+                            if (matches[mi].indexOf('blob:') !== 0 && matches[mi].indexOf('data:') !== 0) {
+                                urls.push(matches[mi]);
+                            }
+                        }
+                    }
+                }
+                return JSON.stringify(urls.slice(0, 5));
+            })()
+            """
+            exec_result3 = await _camofox_post(f"/tabs/{tab_id}/evaluate", {
+                "userId": user_id,
+                "expression": html_search_js
+            })
+            rt3 = exec_result3.get("result", "")
+            if rt3 and rt3 != "undefined":
+                found_urls = _json.loads(rt3)
+                if found_urls:
+                    video_url = found_urls[0]
 
         if not video_url:
             raise RuntimeError(
-                f"未在页面中找到可下载的视频源。\n"
+                "未在页面中找到可下载的视频源。\n"
                 f"页面标题: {page_info.get('title', '未知')}\n"
-                f"视频元素: {page_info.get('videoCount', 0)} 个\n"
-                f"{'（此网站可能需要其他处理方式）' if page_info.get('videoCount', 0) == 0 else '（视频元素未加载或受保护）'}"
+                f"视频元素: {'有' if page_info.get('hasVideo') else '无'}\n"
+                "说明: 此网站的视频使用动态blob加密加载（小红书等平台），\n"
+                "      无法直接提取视频地址下载。建议尝试B站、YouTube等\n"
+                "      直接提供视频URL的平台。"
             )
 
         # 安全文件名
@@ -691,6 +734,9 @@ async def download_via_camofox_generic(url: str, output_dir: Path) -> Path:
 
         # 判断是音频还是视频（音频链接不转码，视频需提取音频）
         is_audio = any(video_url.lower().endswith(ext) for ext in ['.m4a', '.mp3', '.aac', '.wav', '.ogg'])
+
+        # 获取域名用于 Referer
+        domain = url.split("/")[2] if "://" in url else url.split("/")[0]
 
         proc = await asyncio.create_subprocess_exec(
             "curl", "-s", "-L", "-o", str(output_path),
@@ -961,23 +1007,13 @@ async def transcribe_url(
     if not url:
         raise HTTPException(400, "请提供视频URL")
 
-    # 解析平台（扩展支持更多网站）
+    # 解析平台
     platform = "other"
     url_lower = url.lower()
     if "bilibili.com" in url_lower or "b23.tv" in url_lower:
         platform = "bilibili"
     elif "youtube.com" in url_lower or "youtu.be" in url_lower:
         platform = "youtube"
-    elif "douyin.com" in url_lower or "iesdouyin.com" in url_lower:
-        platform = "douyin"
-    elif "kuaishou.com" in url_lower or "gifshow.com" in url_lower:
-        platform = "kuaishou"
-    elif "xiaohongshu.com" in url_lower or "xhslink.com" in url_lower:
-        platform = "xiaohongshu"
-    elif "weibo.com" in url_lower or "weibo.cn" in url_lower:
-        platform = "weibo"
-    elif "x.com" in url_lower or "twitter.com" in url_lower:
-        platform = "twitter"
 
     task_id = uuid.uuid4().hex[:12]
     tasks[task_id] = {

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>转录助手 · AI 视频音频转文字</title>
-    <meta name="description" content="AI 驱动的视频/音频转文字服务。支持文件上传和B站/抖音/小红书/微博/YouTube链接，自动转录、纠错、总结。">
+    <meta name="description" content="AI 驱动的视频/音频转文字服务。支持文件上传和B站/YouTube链接转录，自动纠错、总结。">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -24,13 +24,13 @@
 <!-- ============ Hero ============ -->
 <section class="hero container">
     <h1>AI 视频音频转文字</h1>
-    <p>上传录音、视频，或粘贴 B站/抖音/小红书/微博/YouTube 链接。<br>AI 自动转写文字，纠错同音字，提炼核心要点。</p>
+    <p>上传音频视频文件，或粘贴 B站/YouTube 链接。<br>AI 自动转写文字，纠错同音字，提炼核心要点。</p>
     <div class="features">
         <div class="feature-item"><span class="icon">🎤</span> 智能语音识别</div>
         <div class="feature-item"><span class="icon green">✓</span> ASR 纠错</div>
         <div class="feature-item"><span class="icon green">✓</span> AI 内容总结</div>
         <div class="feature-item"><span class="icon green">✓</span> SRT 字幕导出</div>
-        <div class="feature-item"><span class="icon green">✓</span> 全平台支持</div>
+        <div class="feature-item"><span class="icon green">✓</span> 文件/B站/YouTube</div>
     </div>
 </section>
 
@@ -63,13 +63,13 @@
         <!-- URL 模式 -->
         <div id="panel-url" class="mode-panel">
             <div class="url-input-group">
-                <input id="url-input" type="url" placeholder="粘贴视频链接（B站/抖音/小红书/微博/YouTube...）" />
+                <input id="url-input" type="url" placeholder="粘贴 B站/YouTube 视频链接" />
                 <button id="url-btn" class="btn btn-primary" type="button">🚀 转录</button>
             </div>
             <span id="url-error" class="msg-error" style="display:none"></span>
             <p style="margin-top:10px;color:var(--text-dim);font-size:.8rem">
-                💡 支持 B站、YouTube、抖音、快手、小红书、微博、Twitter/X 等视频链接<br>
-                <span style="opacity:0.6">无需登录，直接粘贴链接即可</span>
+                💡 支持 B站（b23.tv）和 YouTube 视频链接<br>
+                <span style="opacity:0.6">其他平台暂不支持在线转录，请下载后使用文件上传功能</span>
             </p>
         </div>
     </div>
@@ -156,7 +156,7 @@
 
 <!-- ============ 页脚 ============ -->
 <footer class="footer container">
-    <p>转录助手 · 基于 faster-whisper + AI 纠错 · 数据24小时自动清除</p>
+    <p>转录助手 · FunASR + AI 纠错 · 支持 B站/YouTube 链接转录</p>
 </footer>
 
 <!-- ============ 消息提示 ============ -->
