@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>转录助手 · AI 视频音频转文字</title>
+    <meta name="description" content="AI 驱动的视频/音频转文字服务。支持文件上传和B站/抖音/小红书/微博/YouTube链接，自动转录、纠错、总结。">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ============ 导航栏 ============ -->
+<nav class="navbar container">
+    <div class="logo">🎯 <span>转录助手</span></div>
+    <div class="nav-links">
+        <a onclick="document.getElementById('transcribe-section').scrollIntoView({behavior:'smooth'})">开始转录</a>
+        <a onclick="document.getElementById('history-section').scrollIntoView({behavior:'smooth'})">历史记录</a>
+    </div>
+</nav>
+
+<!-- ============ Hero ============ -->
+<section class="hero container">
+    <h1>AI 视频音频转文字</h1>
+    <p>上传录音、视频，或粘贴 B站/抖音/小红书/微博/YouTube 链接。<br>AI 自动转写文字，纠错同音字，提炼核心要点。</p>
+    <div class="features">
+        <div class="feature-item"><span class="icon">🎤</span> 智能语音识别</div>
+        <div class="feature-item"><span class="icon green">✓</span> ASR 纠错</div>
+        <div class="feature-item"><span class="icon green">✓</span> AI 内容总结</div>
+        <div class="feature-item"><span class="icon green">✓</span> SRT 字幕导出</div>
+        <div class="feature-item"><span class="icon green">✓</span> 全平台支持</div>
+    </div>
+</section>
+
+<!-- ============ 转录区域 ============ -->
+<section id="transcribe-section" class="container">
+    <div class="card">
+        <h3>🎙️ 开始转录</h3>
+
+        <!-- 模式切换 -->
+        <div class="mode-switch">
+            <button id="mode-upload" class="mode-btn active" type="button">📤 上传文件</button>
+            <button id="mode-url" class="mode-btn" type="button">🔗 粘贴链接</button>
+        </div>
+
+        <!-- 上传模式 -->
+        <div id="panel-upload" class="mode-panel active">
+            <label id="upload-zone" class="upload-zone" for="file-input">
+                <span class="icon">📂</span>
+                <p>点击此处选择文件</p>
+                <span class="hint">支持 MP3, MP4, WAV, M4A, AVI, MOV · 最大 500MB</span>
+                <span id="file-name" class="selected-file" style="display:none"></span>
+                <input id="file-input" type="file" accept="audio/*,video/*,.mp3,.mp4,.wav,.m4a,.avi,.mov" hidden>
+            </label>
+            <div style="margin-top:16px">
+                <span id="upload-error" class="msg-error" style="display:none"></span>
+                <button id="upload-btn" class="btn btn-primary btn-block" type="button">🚀 开始转录</button>
+            </div>
+        </div>
+
+        <!-- URL 模式 -->
+        <div id="panel-url" class="mode-panel">
+            <div class="url-input-group">
+                <input id="url-input" type="url" placeholder="粘贴视频链接（B站/抖音/小红书/微博/YouTube...）" />
+                <button id="url-btn" class="btn btn-primary" type="button">🚀 转录</button>
+            </div>
+            <span id="url-error" class="msg-error" style="display:none"></span>
+            <p style="margin-top:10px;color:var(--text-dim);font-size:.8rem">
+                💡 支持 B站、YouTube、抖音、快手、小红书、微博、Twitter/X 等视频链接<br>
+                <span style="opacity:0.6">无需登录，直接粘贴链接即可</span>
+            </p>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 进度 ============ -->
+<section class="container">
+    <div id="progress-section" class="card progress-section">
+        <h3>⏳ 处理中</h3>
+        <div class="progress-bar">
+            <div id="progress-fill" class="progress-fill" style="width:0%"></div>
+        </div>
+        <div class="progress-info">
+            <span id="progress-status" class="progress-status">排队中...</span>
+            <span id="progress-percent">0%</span>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 结果 ============ -->
+<section class="container">
+    <div id="result-section" class="card result-section">
+        <h3 id="result-title">📝 转录结果</h3>
+
+        <div class="result-tabs">
+            <button class="result-tab" onclick="switchResultTab('transcript')" type="button">📝 逐段文字</button>
+            <button class="result-tab" onclick="switchResultTab('corrected')" type="button">🔧 纠错版</button>
+            <button class="result-tab active" id="rtab-summary" onclick="switchResultTab('summary')" type="button">📋 AI 总结</button>
+        </div>
+
+        <div id="rpanel-transcript" class="result-panel">
+            <div id="seg-list" class="segments-list"></div>
+        </div>
+
+        <div id="rpanel-corrected" class="result-panel">
+            <div id="corrected-box" class="corrected-box"></div>
+        </div>
+
+        <div id="rpanel-summary" class="result-panel active">
+            <div id="summary-box" class="summary-box"></div>
+        </div>
+
+        <div class="result-actions">
+            <a id="export-txt" class="btn btn-sm btn-outline" href="#" target="_blank">📄 TXT</a>
+            <a id="export-srt" class="btn btn-sm btn-outline" href="#" target="_blank">🎬 SRT 字幕</a>
+            <a id="export-json" class="btn btn-sm btn-outline" href="#" target="_blank">📊 JSON</a>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 历史记录 ============ -->
+<section id="history-section" class="container">
+    <div class="card">
+        <h3>📋 历史记录</h3>
+        <div id="task-list" class="task-list">
+            <div class="empty-state">加载中...</div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 页脚 ============ -->
+<footer class="footer container">
+    <p>转录助手 · 基于 faster-whisper + AI 纠错 · 数据24小时自动清除</p>
+</footer>
+
+<!-- ============ 消息提示 ============ -->
+<div id="toast" class="toast">
+    <span id="toast-msg"></span>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
