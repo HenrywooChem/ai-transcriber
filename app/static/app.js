@@ -1,6 +1,55 @@
 /* =============================================
-   视频转录服务 - 前端逻辑
+   视频转录服务 - 前端逻辑（含用户认证）
    ============================================= */
+
+// ============ 认证状态 ============
+const AUTH_KEY = 'transcriber_token';
+const USER_KEY = 'transcriber_user';
+
+let authToken = localStorage.getItem(AUTH_KEY) || '';
+let authUser = localStorage.getItem(USER_KEY) || '';
+
+function isLoggedIn() { return !!authToken; }
+
+function saveAuth(token, username) {
+    authToken = token;
+    authUser = username;
+    localStorage.setItem(AUTH_KEY, token);
+    localStorage.setItem(USER_KEY, username);
+}
+
+function clearAuth() {
+    authToken = '';
+    authUser = '';
+    localStorage.removeItem(AUTH_KEY);
+    localStorage.removeItem(USER_KEY);
+}
+
+// 带认证的 fetch 封装
+async function authFetch(url, options = {}) {
+    const headers = options.headers || {};
+    if (authToken) {
+        headers['Authorization'] = 'Bearer ' + authToken;
+    }
+    if (!options.method || options.method === 'GET') {
+        // 对于 GET 请求，不设置 Content-Type，JSON Body 也不该有
+        options.headers = headers;
+    } else if (options.body && typeof options.body === 'string') {
+        headers['Content-Type'] = 'application/json';
+        options.headers = headers;
+    } else {
+        options.headers = headers;
+    }
+    const res = await fetch(url, options);
+    if (res.status === 401) {
+        // Token 过期，清除登录状态
+        clearAuth();
+        updateAuthUI();
+        showLoginModal();
+        throw new Error('登录已过期，请重新登录');
+    }
+    return res;
+}
 
 // ============ 状态 ============
 let pollTimer = null;
@@ -42,7 +91,135 @@ const el = {
 
     toast: $('toast'),
     toastMsg: $('toast-msg'),
+
+    authArea: $('auth-area'),
+    loginBtn: $('login-btn'),
+
+    authModal: $('auth-modal'),
+    loginUsername: $('login-username'),
+    loginPassword: $('login-password'),
+    loginError: $('login-error'),
+    regUsername: $('reg-username'),
+    regPassword: $('reg-password'),
+    regConfirm: $('reg-confirm'),
+    regError: $('reg-error'),
 };
+
+// ============ 认证 UI ============
+function updateAuthUI() {
+    if (!el.authArea) return;
+    if (isLoggedIn()) {
+        const initial = authUser.charAt(0).toUpperCase();
+        el.authArea.innerHTML = `
+            <div class="auth-avatar">
+                <span class="avatar-icon">${escapeHtml(initial)}</span>
+                <span>${escapeHtml(authUser)}</span>
+                <span class="logout-link" onclick="doLogout()">退出</span>
+            </div>
+        `;
+    } else {
+        el.authArea.innerHTML = '<button id="login-btn" class="btn btn-sm btn-primary" type="button" onclick="showLoginModal()">登录</button>';
+    }
+}
+
+function showLoginModal() {
+    el.authModal.style.display = 'flex';
+    switchAuthTab('login');
+    el.loginUsername.value = '';
+    el.loginPassword.value = '';
+    el.loginError.style.display = 'none';
+}
+
+function hideAuthModal() {
+    el.authModal.style.display = 'none';
+}
+
+function switchAuthTab(name) {
+    document.querySelectorAll('.modal-tab').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.auth-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('auth-tab-' + name)?.classList.add('active');
+    document.getElementById('auth-panel-' + name)?.classList.add('active');
+}
+
+async function doLogin() {
+    const username = el.loginUsername.value.trim();
+    const password = el.loginPassword.value;
+    if (!username || !password) {
+        el.loginError.textContent = '❌ 请输入用户名和密码';
+        el.loginError.style.display = 'block';
+        return;
+    }
+    el.loginError.style.display = 'none';
+    try {
+        const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || '登录失败');
+        saveAuth(data.token, data.username);
+        updateAuthUI();
+        hideAuthModal();
+        showToast('✅ 登录成功，欢迎回来！', 'success');
+    } catch (err) {
+        el.loginError.textContent = '❌ ' + err.message;
+        el.loginError.style.display = 'block';
+    }
+}
+
+async function doRegister() {
+    const username = el.regUsername.value.trim();
+    const password = el.regPassword.value;
+    const confirm = el.regConfirm.value;
+    if (!username || !password) {
+        el.regError.textContent = '❌ 请填写用户名和密码';
+        el.regError.style.display = 'block';
+        return;
+    }
+    if (password.length < 4) {
+        el.regError.textContent = '❌ 密码至少4个字符';
+        el.regError.style.display = 'block';
+        return;
+    }
+    if (password !== confirm) {
+        el.regError.textContent = '❌ 两次密码不一致';
+        el.regError.style.display = 'block';
+        return;
+    }
+    el.regError.style.display = 'none';
+    try {
+        const res = await fetch('/api/auth/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || '注册失败');
+        saveAuth(data.token, data.username);
+        updateAuthUI();
+        hideAuthModal();
+        showToast('🎉 注册成功！', 'success');
+    } catch (err) {
+        el.regError.textContent = '❌ ' + err.message;
+        el.regError.style.display = 'block';
+    }
+}
+
+function doLogout() {
+    clearAuth();
+    updateAuthUI();
+    showToast('已退出登录');
+}
+
+// Enter 键快捷登录/注册
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && el.authModal.style.display === 'flex') {
+        const loginActive = el.loginPassword.closest('.auth-panel.active');
+        if (loginActive) doLogin();
+        else doRegister();
+    }
+});
 
 // ============ Toast ============
 function showToast(msg, type = '') {
@@ -97,7 +274,6 @@ el.uploadZone.addEventListener('drop', e => {
         showSelectedFile();
     }
 });
-// 点击标签手动触发的兜底方案（部分浏览器 <label for> 不工作）
 el.uploadZone.addEventListener('click', () => {
     el.fileInput.click();
 });
@@ -117,6 +293,10 @@ function showSelectedFile() {
 
 // ============ 上传文件 ============
 el.uploadBtn.addEventListener('click', async () => {
+    if (!isLoggedIn()) {
+        showLoginModal();
+        return;
+    }
     showError(el.uploadError);
     const file = el.fileInput.files[0];
     if (!file) {
@@ -133,7 +313,7 @@ el.uploadBtn.addEventListener('click', async () => {
     formData.append('use_llm', 'true');
 
     try {
-        const res = await fetch('/api/transcribe/upload', { method: 'POST', body: formData });
+        const res = await authFetch('/api/transcribe/upload', { method: 'POST', body: formData });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || '上传失败');
         showToast('✅ 上传成功，开始转录...', 'success');
@@ -141,18 +321,23 @@ el.uploadBtn.addEventListener('click', async () => {
         el.uploadBtn.textContent = '⏳ 转录中...';
         startPolling(data.task_id);
     } catch (err) {
-        showError(el.uploadError, err.message);
+        if (err.message !== '登录已过期，请重新登录') {
+            showError(el.uploadError, err.message);
+        }
     }
 });
 
 // ============ URL转写 ============
 function extractUrl(text) {
-    // 从包含标题的粘贴文本中提取实际 URL
     const m = text.match(/https?:\/\/[^\s]+/);
     return m ? m[0] : text;
 }
 
 el.urlBtn.addEventListener('click', async () => {
+    if (!isLoggedIn()) {
+        showLoginModal();
+        return;
+    }
     showError(el.urlError);
     let url = el.urlInput.value.trim();
     url = extractUrl(url);
@@ -162,7 +347,7 @@ el.urlBtn.addEventListener('click', async () => {
     }
 
     try {
-        const res = await fetch('/api/transcribe/url', {
+        const res = await authFetch('/api/transcribe/url', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url, use_llm: true })
@@ -174,7 +359,9 @@ el.urlBtn.addEventListener('click', async () => {
         el.urlBtn.textContent = '⏳ 处理中...';
         startPolling(data.task_id);
     } catch (err) {
-        showError(el.urlError, err.message);
+        if (err.message !== '登录已过期，请重新登录') {
+            showError(el.urlError, err.message);
+        }
     }
 });
 
@@ -369,5 +556,6 @@ function escapeHtml(s) {
 
 // ============ 初始化 ============
 document.addEventListener('DOMContentLoaded', () => {
+    updateAuthUI();
     loadHistory();
 });

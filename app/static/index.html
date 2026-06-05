@@ -16,6 +16,9 @@
         <a onclick="document.getElementById('transcribe-section').scrollIntoView({behavior:'smooth'})">开始转录</a>
         <a onclick="document.getElementById('history-section').scrollIntoView({behavior:'smooth'})">历史记录</a>
     </div>
+    <div id="auth-area" class="auth-area">
+        <button id="login-btn" class="btn btn-sm btn-primary" type="button" onclick="showLoginModal()">登录</button>
+    </div>
 </nav>
 
 <!-- ============ Hero ============ -->
@@ -126,6 +129,30 @@
         </div>
     </div>
 </section>
+
+<!-- ============ 登录/注册弹窗 ============ -->
+<div id="auth-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)hideAuthModal()">
+    <div class="modal-card">
+        <button class="modal-close" onclick="hideAuthModal()">&times;</button>
+        <div class="modal-tabs">
+            <button id="auth-tab-login" class="modal-tab active" onclick="switchAuthTab('login')">登录</button>
+            <button id="auth-tab-register" class="modal-tab" onclick="switchAuthTab('register')">注册</button>
+        </div>
+        <div id="auth-panel-login" class="auth-panel active">
+            <input id="login-username" class="auth-input" type="text" placeholder="用户名" autocomplete="username">
+            <input id="login-password" class="auth-input" type="password" placeholder="密码" autocomplete="current-password">
+            <span id="login-error" class="msg-error" style="display:none"></span>
+            <button class="btn btn-primary btn-block" type="button" onclick="doLogin()">登 录</button>
+        </div>
+        <div id="auth-panel-register" class="auth-panel">
+            <input id="reg-username" class="auth-input" type="text" placeholder="用户名" autocomplete="username">
+            <input id="reg-password" class="auth-input" type="password" placeholder="密码（至少4个字符）" autocomplete="new-password">
+            <input id="reg-confirm" class="auth-input" type="password" placeholder="确认密码" autocomplete="new-password">
+            <span id="reg-error" class="msg-error" style="display:none"></span>
+            <button class="btn btn-primary btn-block" type="button" onclick="doRegister()">注 册</button>
+        </div>
+    </div>
+</div>
 
 <!-- ============ 页脚 ============ -->
 <footer class="footer container">

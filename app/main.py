@@ -4,7 +4,10 @@
 """
 import os, json, time, uuid, asyncio, shutil
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form, Query, Request
+import hashlib, base64, secrets, sqlite3
+import jwt
+from datetime import datetime, timedelta
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form, Query, Request, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -63,6 +66,74 @@ def save_api_keys():
     API_KEYS_FILE.write_text(json.dumps(API_KEYS, ensure_ascii=False, indent=2))
 
 load_api_keys()
+
+# ============================================================
+# 用户认证（JWT + SQLite）
+# ============================================================
+JWT_SECRET_FILE = DATA_DIR / "jwt_secret.txt"
+if JWT_SECRET_FILE.exists():
+    JWT_SECRET = JWT_SECRET_FILE.read_text().strip()
+else:
+    JWT_SECRET = hashlib.sha256(os.urandom(64)).hexdigest()
+    JWT_SECRET_FILE.write_text(JWT_SECRET)
+
+USERS_DB = DATA_DIR / "users.db"
+
+def init_users_db():
+    conn = sqlite3.connect(str(USERS_DB))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at REAL,
+            is_admin INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
+    return salt + ':' + base64.b64encode(h).decode()
+
+def verify_password(password: str, hash_str: str) -> bool:
+    parts = hash_str.split(':', 1)
+    if len(parts) != 2:
+        return False
+    salt, stored_hash = parts
+    h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
+    return base64.b64encode(h).decode() == stored_hash
+
+def create_token(username: str) -> str:
+    payload = {
+        "sub": username,
+        "exp": datetime.utcnow() + timedelta(days=30),
+        "iat": datetime.utcnow()
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+def verify_token(token: str) -> str | None:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return payload.get("sub")
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
+init_users_db()
+
+async def get_current_user(request: Request):
+    """从 Authorization header 获取当前登录用户"""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "未登录，请先登录")
+    username = verify_token(auth[7:])
+    if not username:
+        raise HTTPException(401, "登录已过期，请重新登录")
+    return username
 
 def verify_key(request: Request):
     """从请求头或查询参数获取 API Key"""
@@ -784,6 +855,43 @@ async def run_url_task(task_id: str, url: str, use_llm: bool):
 # API 路由
 # ============================================================
 
+# ============ 用户认证 ============
+@app.post("/api/auth/register")
+async def register(data: dict):
+    username = (data.get("username") or "").strip()
+    password = data.get("password", "")
+    if not username or len(username) < 2:
+        raise HTTPException(400, "用户名至少2个字符")
+    if len(password) < 4:
+        raise HTTPException(400, "密码至少4个字符")
+    conn = sqlite3.connect(str(USERS_DB))
+    try:
+        conn.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                     (username, hash_password(password), time.time()))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(409, "用户名已存在")
+    conn.close()
+    token = create_token(username)
+    return {"username": username, "token": token}
+
+@app.post("/api/auth/login")
+async def login(data: dict):
+    username = (data.get("username") or "").strip()
+    password = data.get("password", "")
+    conn = sqlite3.connect(str(USERS_DB))
+    row = conn.execute("SELECT password_hash FROM users WHERE username = ?", (username,)).fetchone()
+    conn.close()
+    if not row or not verify_password(password, row[0]):
+        raise HTTPException(401, "用户名或密码错误")
+    token = create_token(username)
+    return {"username": username, "token": token}
+
+@app.get("/api/auth/me")
+async def me(username: str = Depends(get_current_user)):
+    return {"username": username}
+
 @app.get("/")
 async def root():
     html_path = STATIC_DIR / "index.html"
@@ -803,7 +911,8 @@ async def status():
 async def transcribe_upload(
     request: Request,
     file: UploadFile = File(...),
-    use_llm: bool = Form(True)
+    use_llm: bool = Form(True),
+    user: str = Depends(get_current_user)
 ):
     """上传文件转录"""
     key_name = verify_key(request)
@@ -834,7 +943,8 @@ async def transcribe_upload(
 @app.post("/api/transcribe/url")
 async def transcribe_url(
     request: Request,
-    data: dict
+    data: dict,
+    user: str = Depends(get_current_user)
 ):
     """通过URL下载并转录（支持YouTube/B站）"""
     key_name = verify_key(request)
