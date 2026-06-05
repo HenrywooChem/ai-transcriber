@@ -97,6 +97,26 @@ el.uploadZone.addEventListener('drop', e => {
         showSelectedFile();
     }
 });
+// 透明盖层也要捕获拖拽事件
+el.fileInput.addEventListener('dragover', e => {
+    e.preventDefault();
+    el.uploadZone.classList.add('dragover');
+});
+el.fileInput.addEventListener('dragleave', () => {
+    el.uploadZone.classList.remove('dragover');
+});
+el.fileInput.addEventListener('drop', e => {
+    e.preventDefault();
+    el.uploadZone.classList.remove('dragover');
+    if (e.dataTransfer.files.length) {
+        el.fileInput.files = e.dataTransfer.files;
+        showSelectedFile();
+    }
+});
+// 点击标签手动触发的兜底方案（有些浏览器 <label for> 不工作）
+el.uploadZone.addEventListener('click', () => {
+    el.fileInput.click();
+});
 el.fileInput.addEventListener('change', showSelectedFile);
 
 function showSelectedFile() {
