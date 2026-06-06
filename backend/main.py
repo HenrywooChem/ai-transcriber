@@ -35,23 +35,56 @@ OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 FUN_ASR_MODEL = os.environ.get("FUN_ASR_MODEL", "iic/SenseVoiceSmall")
 
+# 设置 ffmpeg 路径（优先级：环境变量 > 剪映 > 系统）
+FFMPEG_PATH = os.environ.get("FFMPEG_PATH")
+if not FFMPEG_PATH:
+    jianying_ffmpeg = Path("C:/Users/IT-DEV/AppData/Local/JianyingPro/Apps/10.6.0.14057/ffmpeg.exe")
+    if jianying_ffmpeg.exists():
+        FFMPEG_PATH = str(jianying_ffmpeg)
+    else:
+        FFMPEG_PATH = "ffmpeg"  # 使用系统PATH中的ffmpeg
+
+print(f"[Config] ffmpeg路径: {FFMPEG_PATH}")
+
 # 初始化 OpenAI 客户端（用于AI纠错和总结）
 ai_client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL) if OPENAI_API_KEY else None
 
-# FunASR 模型（延迟加载）
+# ASR 模型（延迟加载）
+# 优先使用 Whisper，因为 FunASR 在 Windows 上有 PyTorch DLL 问题
 asr_model = None
+asr_backend = None  # "whisper" or "funasr"
 
 def get_asr_model():
-    """获取FunASR模型（懒加载）"""
-    global asr_model
+    """获取ASR模型（懒加载，优先Whisper）"""
+    global asr_model, asr_backend
     if asr_model is None:
+        # 尝试加载 Whisper
+        try:
+            import whisper
+            print("[ASR] 加载 Whisper base 模型...")
+            asr_model = whisper.load_model("base")
+            asr_backend = "whisper"
+            print("[ASR] Whisper 模型加载完成")
+            return asr_model
+        except Exception as e:
+            print(f"[ASR] Whisper 加载失败: {e}")
+        
+        # 回退到 FunASR
         try:
             from funasr import AutoModel
-            print(f"[ASR] 加载模型: {FUN_ASR_MODEL}")
-            asr_model = AutoModel(model=FUN_ASR_MODEL, device="cuda")  # 有GPU用cuda，否则改"cpu"
-            print("[ASR] 模型加载完成")
+            device = "cpu"  # FunASR 在 Windows 上可能有 DLL 问题
+            print(f"[ASR] 尝试加载 FunASR: {FUN_ASR_MODEL}")
+            asr_model = AutoModel(
+                model=FUN_ASR_MODEL,
+                device=device,
+                disable_update=True
+            )
+            asr_backend = "funasr"
+            print("[ASR] FunASR 模型加载完成")
         except Exception as e:
-            print(f"[ASR] 模型加载失败: {e}")
+            print(f"[ASR] FunASR 加载失败: {e}")
+            import traceback
+            traceback.print_exc()
             asr_model = "error"
     return asr_model if asr_model != "error" else None
 
@@ -105,6 +138,7 @@ def download_video(url: str, task_id: str) -> str:
         }],
         'quiet': True,
         'no_warnings': True,
+        'ffmpeg_location': os.path.dirname(FFMPEG_PATH) if FFMPEG_PATH != 'ffmpeg' else None,
     }
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -125,26 +159,45 @@ def download_video(url: str, task_id: str) -> str:
 
 
 def transcribe_audio(audio_path: str) -> str:
-    """使用FunASR转录音频"""
+    """使用ASR模型转录音频（优先云端API，回退本地）"""
+    
+    # 优先使用 OpenAI Whisper API（不依赖本地PyTorch）
+    if OPENAI_API_KEY and OPENAI_BASE_URL:
+        try:
+            print(f"[ASR] 使用 OpenAI Whisper API 转录: {audio_path}")
+            import openai
+            client = openai.OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+            
+            with open(audio_path, "rb") as f:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=f,
+                    language="zh"
+                )
+            return transcript.text
+        except Exception as e:
+            print(f"[ASR] OpenAI API 失败: {e}，回退本地模型...")
+    
+    # 回退到本地模型
     model = get_asr_model()
     if model is None:
-        # 回退方案：使用 whisper（如果安装了）
-        try:
-
-            result = model.transcribe(audio_path)
-            return result["text"]
-        except:
-            raise Exception("ASR模型未加载，且未安装whisper回退方案")
+        raise Exception("ASR模型未加载，且未配置OpenAI API。请安装Visual C++运行时库修复PyTorch DLL问题。")
     
-    # FunASR 推理
-    result = model.generate(input=audio_path)
-    # SenseVoice 返回格式: [{'text': '...', 'timestamp': [...]}]
-    if isinstance(result, list) and len(result) > 0:
-        text = result[0].get('text', '')
-        # 去除说话人标签等（SenseVoice会输出 "<|zh|><|NEUTRAL|><|Speech|>" 等标签）
-        text = re.sub(r'<\|[^|]+\|>','', text)
-        return text
-    return str(result)
+    # 根据后端类型选择推理方式
+    if asr_backend == "whisper":
+        # Whisper 推理
+        print(f"[ASR] 使用本地 Whisper 转录: {audio_path}")
+        result = model.transcribe(audio_path, language="zh")
+        return result["text"]
+    else:
+        # FunASR 推理
+        print(f"[ASR] 使用 FunASR 转录: {audio_path}")
+        result = model.generate(input=audio_path)
+        if isinstance(result, list) and len(result) > 0:
+            text = result[0].get('text', '')
+            text = re.sub(r'<\|[^|]+\|>','', text)
+            return text
+        return str(result)
 
 
 async def ai_correct_and_summarize(text: str) -> dict:
