@@ -379,6 +379,35 @@ async def download_audio(url: str, output_dir: Path) -> Path:
         "如需转录其他平台视频，请先下载到本地，再使用「上传文件」功能。"
     )
 
+async def ensure_camofox_ready(max_wait: int = 90) -> None:
+    """检查 Camofox 健康状态，浏览器未运行时触发启动"""
+    import aiohttp
+    health_url = "http://localhost:9377/health"
+
+    for attempt in range(max_wait // 5):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(health_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("browserRunning") and data.get("browserConnected"):
+                            return  # 一切正常
+        except Exception:
+            pass
+
+        # 浏览器未运行 — 创建一个首页标签页触发 ensureBrowser()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.post("http://localhost:9377/tabs",
+                    json={"userId": "healthcheck", "sessionKey": "ping", "url": "about:blank"},
+                    timeout=aiohttp.ClientTimeout(total=15))
+        except Exception:
+            pass
+
+        await asyncio.sleep(5)
+
+    raise RuntimeError(f"Camofox 浏览器在 {max_wait}s 内未能就绪")
+
 async def download_bilibili_via_camofox(url: str, output_dir: Path) -> Path:
     """通过 Camofox 浏览器下载 B站音频"""
     import aiohttp
@@ -386,6 +415,9 @@ async def download_bilibili_via_camofox(url: str, output_dir: Path) -> Path:
     camofox_base = "http://localhost:9377"
     user_id = "transcriber"
     tab_id = None
+
+    # 确保浏览器已就绪
+    await ensure_camofox_ready()
 
     async def _camofox_post(path: str, data: dict = None) -> dict:
         async with aiohttp.ClientSession() as session:
