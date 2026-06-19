@@ -198,7 +198,13 @@ async def transcribe_audio(audio_path: Path) -> dict:
 
     # 构建文件公开 URL（DashScope API 需要可下载的 HTTP 地址）
     filename = audio_path.name
-    public_url = f"{_PUBLIC_BASE_URL}/temp_audio/{filename}"
+    # 兼容文件在 UPLOAD_DIR 子目录的情况（URL下载任务）
+    try:
+        relative = audio_path.relative_to(UPLOAD_DIR)
+        temp_path = str(relative)
+    except ValueError:
+        temp_path = filename
+    public_url = f"{_PUBLIC_BASE_URL}/temp_audio/{temp_path}"
 
     import dashscope
     from dashscope.audio.asr import Transcription
@@ -934,15 +940,17 @@ async def me(username: str = Depends(get_current_user)):
     return {"username": username}
 
 # 临时音频文件服务（供百炼 ASR 下载）
-@app.get("/temp_audio/{filename}")
-async def temp_audio(filename: str):
+@app.get("/temp_audio/{path:path}")
+async def temp_audio(path: str):
     from fastapi.responses import FileResponse
-    file_path = UPLOAD_DIR / filename
-    if file_path.exists():
+    # 防止路径穿越
+    clean_path = path.replace("..", "").lstrip("/")
+    file_path = UPLOAD_DIR / clean_path
+    if file_path.exists() and file_path.is_file():
         return FileResponse(str(file_path), media_type="audio/wav")
-    # 也在 results 目录找
-    file_path = RESULTS_DIR / filename
-    if file_path.exists():
+    # 也查 results 目录
+    file_path = RESULTS_DIR / clean_path
+    if file_path.exists() and file_path.is_file():
         return FileResponse(str(file_path), media_type="audio/wav")
     raise HTTPException(404, "音频文件不存在或已过期")
 
