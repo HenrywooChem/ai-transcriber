@@ -308,6 +308,16 @@ el.uploadBtn.addEventListener('click', async () => {
         return;
     }
 
+    // 立即显示进度条（不等 POST 返回）
+    el.progressSection.classList.add('active');
+    el.resultSection.classList.remove('active');
+    el.progressFill.style.width = '10%';
+    el.progressStatus.textContent = '📤 上传文件中...';
+    el.progressPercent.textContent = '10%';
+    el.uploadBtn.disabled = true;
+    el.uploadBtn.textContent = '⏳ 上传中...';
+    el.progressSection.scrollIntoView({ behavior: 'smooth' });
+
     const formData = new FormData();
     formData.append('file', file);
     formData.append('use_llm', 'true');
@@ -317,10 +327,12 @@ el.uploadBtn.addEventListener('click', async () => {
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || '上传失败');
         showToast('✅ 上传成功，开始转录...', 'success');
-        el.uploadBtn.disabled = true;
-        el.uploadBtn.textContent = '⏳ 转录中...';
         startPolling(data.task_id);
     } catch (err) {
+        // 出错后恢复按钮状态
+        el.uploadBtn.disabled = false;
+        el.uploadBtn.textContent = '🚀 开始转录';
+        el.progressSection.classList.remove('active');
         if (err.message !== '登录已过期，请重新登录') {
             showError(el.uploadError, err.message);
         }
@@ -346,6 +358,16 @@ el.urlBtn.addEventListener('click', async () => {
         return;
     }
 
+    // 立即显示进度条（不等 POST 返回）
+    el.progressSection.classList.add('active');
+    el.resultSection.classList.remove('active');
+    el.progressFill.style.width = '10%';
+    el.progressStatus.textContent = '📥 准备提交任务...';
+    el.progressPercent.textContent = '10%';
+    el.urlBtn.disabled = true;
+    el.urlBtn.textContent = '⏳ 处理中...';
+    el.progressSection.scrollIntoView({ behavior: 'smooth' });
+
     try {
         const res = await authFetch('/api/transcribe/url', {
             method: 'POST',
@@ -355,10 +377,12 @@ el.urlBtn.addEventListener('click', async () => {
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || '提交失败');
         showToast('✅ 任务已提交，正在下载...', 'success');
-        el.urlBtn.disabled = true;
-        el.urlBtn.textContent = '⏳ 处理中...';
         startPolling(data.task_id);
     } catch (err) {
+        // 出错后恢复按钮状态
+        el.urlBtn.disabled = false;
+        el.urlBtn.textContent = '🚀 转录';
+        el.progressSection.classList.remove('active');
         if (err.message !== '登录已过期，请重新登录') {
             showError(el.urlError, err.message);
         }
