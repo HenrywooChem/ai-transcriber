@@ -298,9 +298,9 @@ async def llm_process(transcript: dict) -> dict:
             model=llm_model,
             messages=[
                 {"role": "system", "content": "你是一个语音转写文字校对专家。请纠正以下ASR转写文本中的错误（专有名词、同音字等），保持原意和口语风格不变。只返回纠正后的文本。"},
-                {"role": "user", "content": full_text[:3000]}
+                {"role": "user", "content": full_text}
             ],
-            temperature=0.1, timeout=60)
+            temperature=0.1, timeout=120)
         return resp.choices[0].message.content
     async def summarize():
         resp = await asyncio.to_thread(
@@ -308,9 +308,9 @@ async def llm_process(transcript: dict) -> dict:
             model=llm_model,
             messages=[
                 {"role": "system", "content": "请用中文总结以下视频/播客内容的要点，分点列出，简洁明了。"},
-                {"role": "user", "content": full_text[:4000]}
+                {"role": "user", "content": full_text}
             ],
-            temperature=0.3, timeout=60)
+            temperature=0.3, timeout=120)
         return resp.choices[0].message.content
     transcript["corrected_text"], transcript["summary"] = await asyncio.gather(correct(), summarize())
     return transcript
@@ -1242,6 +1242,24 @@ function switchTab(name){{
 # ============================================================
 # 后台清理（定期删除旧文件）
 # ============================================================
+async def cleanup_orphaned():
+    """启动时清理孤儿文件（下载目录/上传文件/结果文件）"""
+    now = time.time()
+    active_task_ids = set(tasks.keys())
+
+    # 清理 UPLOAD_DIR 中的孤儿子目录（URL下载残留）
+    for item in UPLOAD_DIR.iterdir():
+        if item.is_dir() and item.name not in active_task_ids:
+            shutil.rmtree(item, ignore_errors=True)
+        elif item.is_file() and item.stem not in active_task_ids:
+            item.unlink(missing_ok=True)
+
+    # 清理 RESULTS_DIR 中超过 24h 的孤儿文件
+    for item in RESULTS_DIR.iterdir():
+        if item.is_file() and item.stem not in active_task_ids:
+            if item.stat().st_mtime < now - CLEANUP_HOURS * 3600:
+                item.unlink(missing_ok=True)
+
 async def cleanup_loop():
     while True:
         await asyncio.sleep(3600)
@@ -1252,10 +1270,20 @@ async def cleanup_loop():
                 rfile = RESULTS_DIR / f"{task_id}.json"
                 if rfile.exists():
                     rfile.unlink()
+                # 同时清理 UPLOAD_DIR 中对应的子目录（URL下载）
+                udir = UPLOAD_DIR / task_id
+                if udir.exists() and udir.is_dir():
+                    shutil.rmtree(udir, ignore_errors=True)
+                # 清理 UPLOAD_DIR 中对应的文件（上传文件）
+                for ext in ('.mp3', '.mp4', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.wma', '.webm'):
+                    ufile = UPLOAD_DIR / f"{task_id}{ext}"
+                    if ufile.exists():
+                        ufile.unlink(missing_ok=True)
         save_tasks()
 
 @app.on_event("startup")
 async def startup():
+    asyncio.create_task(cleanup_orphaned())
     asyncio.create_task(cleanup_loop())
 
 # ============================================================
