@@ -24,8 +24,13 @@ if _env_file.exists():
             if k not in os.environ:  # 不覆盖已有的环境变量
                 os.environ[k] = v.strip('"').strip("'")
 
-# 确保关键 Key 存在
+# 确保关键 Key 存在（优先使用百炼，其次是 DeepSeek）
 _DASHSCOPE_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
+_DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+_LLM_PROVIDER = "deepseek" if _DEEPSEEK_KEY else ("dashscope" if _DASHSCOPE_KEY else "none")
+
+# 外部可访问的基础URL（用于 ASR API 下载音频文件）
+_PUBLIC_BASE_URL = "http://124.221.77.205:8000"
 
 # ============================================================
 # 配置
@@ -168,38 +173,16 @@ def save_tasks():
 load_tasks()
 
 # ============================================================
-# FunASR 模型（替换 faster-whisper）
-# ============================================================
-_funasr_model = None
-
-def get_funasr():
-    global _funasr_model
-    if _funasr_model is None:
-        from funasr import AutoModel
-        _funasr_model = AutoModel(
-            model="iic/SenseVoiceSmall",   # 识别+情感，中英日韩粤
-            device="cpu",
-            disable_update=True,            # 不检查更新，加速启动
-        )
-    return _funasr_model
-
-# ============================================================
-# 核心功能
+# 百炼语音识别（替代本地 FunASR，不占用内存）
 # ============================================================
 async def transcribe_audio(audio_path: Path) -> dict:
-    """用 FunASR 进行语音转录
-    将音频切成 30 秒小块，逐块转录，避免大音频 OOM，同时获得时间戳
-    """
-    loop = asyncio.get_event_loop()
-    model = get_funasr()
+    """用百炼 DashScope ASR 云端转录（不加载模型到本地内存）"""
+    import subprocess, json, time
 
+    # 获取音频时长
     def _get_duration() -> float:
-        """用 ffprobe 获取音频时长（秒）"""
-        import subprocess, json
-        cmd = [
-            "ffprobe", "-v", "quiet", "-print_format", "json",
-            "-show_streams", str(audio_path)
-        ]
+        cmd = ["ffprobe", "-v", "quiet", "-print_format", "json",
+               "-show_streams", str(audio_path)]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         info = json.loads(r.stdout)
         for s in info.get("streams", []):
@@ -208,131 +191,111 @@ async def transcribe_audio(audio_path: Path) -> dict:
                 return float(dur)
         return 0.0
 
-    def _split_audio(duration: float) -> list:
-        """用 ffmpeg 将音频切成 30 秒一块，返回 (chunk_path, start_sec, end_sec) 列表"""
-        import subprocess, tempfile
-        chunks = []
-        chunk_dur = 25  # 25 秒一块，留安全余量
-        start = 0.0
+    duration = _get_duration()
+    if duration <= 0:
+        return {"language": "zh", "duration": 0,
+                "segments": [{"start": 0.0, "end": 0.0, "text": "(音频时长获取失败)"}]}
 
-        tmpdir = Path(audio_path).parent
-        while start < duration:
-            end = min(start + chunk_dur, duration)
-            chunk_path = tmpdir / f"chunk_{int(start)}_{int(end)}.wav"
-            cmd = [
-                "ffmpeg", "-y", "-ss", str(start), "-t", str(end - start),
-                "-i", str(audio_path),
-                "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
-                str(chunk_path)
-            ]
-            subprocess.run(cmd, capture_output=True, timeout=60)
-            if chunk_path.exists() and chunk_path.stat().st_size > 100:
-                chunks.append((chunk_path, start, end))
-            start = end
-        return chunks
+    # 构建文件公开 URL（DashScope API 需要可下载的 HTTP 地址）
+    filename = audio_path.name
+    public_url = f"{_PUBLIC_BASE_URL}/temp_audio/{filename}"
 
-    def _run():
-        duration = _get_duration()
-        import re
+    import dashscope
+    from dashscope.audio.asr import Transcription
 
-        # 验证音频可用性
-        if duration <= 0:
-            return {
-                "language": "zh",
-                "duration": 0,
-                "segments": [{"start": 0.0, "end": 0.0, "text": "(音频时长获取失败)"}]
-            }
+    dashscope.api_key = _DASHSCOPE_KEY
 
-        # 限制最大处理时长（超过 30 分钟不予处理，防 OOM）
-        max_duration = 1800  # 30 分钟
-        if duration > max_duration:
-            duration = max_duration
+    # 提交异步转录任务
+    resp = Transcription.async_call(
+        model='paraformer-v1',
+        file_urls=[public_url],
+    )
+    if resp.status_code != 200:
+        err = resp.output.message if hasattr(resp.output, 'message') else str(resp)
+        return {"language": "zh", "duration": round(duration, 2),
+                "segments": [{"start": 0.0, "end": round(duration, 2),
+                              "text": f"(转录提交失败: {err[:100]})"}]}
 
-        # 音频很短（< 30秒），直接转录
-        if duration <= 30:
-            try:
-                result = model.generate(input=str(audio_path))
-                full_text = ""
-                for item in result:
-                    text = item.get("text", "")
-                    clean = re.sub(r'<\|[^|]+\|>', '', text).strip()
-                    if clean:
-                        full_text = (full_text + " " + clean).strip()
-                text = full_text or "(无识别结果)"
-            except Exception as e:
-                return {
-                    "language": "zh",
-                    "duration": round(duration, 2),
-                    "segments": [{"start": 0.0, "end": round(duration, 2), "text": f"(转录失败: {str(e)[:100]})"}]
-                }
-            return {
-                "language": "zh",
-                "duration": round(duration, 2),
-                "segments": [{"start": 0.0, "end": round(duration, 2), "text": text}]
-            }
+    task_id = resp.output.task_id
 
-        # 音频较长，切块转录（每块 25 秒，避免 OOM）
-        chunks = _split_audio(duration)
-        if not chunks:
-            return {"language": "zh", "duration": round(duration, 2), "segments": [
-                {"start": 0.0, "end": round(duration, 2), "text": "(音频切块失败)"}
-            ]}
+    # 轮询结果（最长等 10 分钟）
+    for i in range(120):
+        await asyncio.sleep(5)
+        result = Transcription.fetch(task_id)
+        status = result.output.task_status
+        if status == 'SUCCEEDED':
+            break
+        elif status == 'FAILED':
+            return {"language": "zh", "duration": round(duration, 2),
+                    "segments": [{"start": 0.0, "end": round(duration, 2),
+                                  "text": f"(转录失败: {result.output.message[:200]})"}]}
+    else:
+        return {"language": "zh", "duration": round(duration, 2),
+                "segments": [{"start": 0.0, "end": round(duration, 2),
+                              "text": "(转录超时)"}]}
 
-        all_segments = []
-        full_text = ""
-        for chunk_path, start, end in chunks:
-            try:
-                result = model.generate(input=str(chunk_path))
-                text = ""
-                for item in result:
-                    t = item.get("text", "")
-                    clean = re.sub(r'<\|[^|]+\|>', '', t).strip()
-                    if clean:
-                        text = (text + " " + clean).strip()
-                if text:
+    # 解析识别结果（需从 transcription_url 额外下载）
+    all_segments = []
+    full_text = ""
+    import requests as _requests
+
+    for r_item in result.output.results:
+        trans_url = r_item.get('transcription_url', '')
+        if not trans_url:
+            continue
+        try:
+            resp_json = _requests.get(trans_url, timeout=30).json()
+        except Exception:
+            continue
+
+        for t_item in resp_json.get('transcripts', []):
+            # 整段文本
+            text = t_item.get('text', '').strip()
+            full_text = (full_text + " " + text).strip() if text else full_text
+
+            # 按句分段（带时间戳）
+            for sentence in t_item.get('sentences', []):
+                s_text = sentence.get('text', '').strip()
+                if s_text:
                     all_segments.append({
-                        "start": round(start, 2),
-                        "end": round(end, 2),
-                        "text": text
+                        "start": round(sentence.get('begin_time', 0) / 1000.0, 2),
+                        "end": round(sentence.get('end_time', 0) / 1000.0, 2),
+                        "text": s_text
                     })
-                    full_text = (full_text + " " + text).strip()
-            except Exception as e:
-                all_segments.append({
-                    "start": round(start, 2),
-                    "end": round(end, 2),
-                    "text": f"(段转录失败: {str(e)[:80]})"
-                })
-            finally:
-                if chunk_path.exists():
-                    chunk_path.unlink()
 
-        if not all_segments:
-            all_segments = [{"start": 0.0, "end": round(duration, 2), "text": "(无识别结果)"}]
-            full_text = "(无识别结果)"
+    if not all_segments:
+        all_segments = [{"start": 0.0, "end": round(duration, 2), "text": "(无识别结果)"}]
 
-        return {
-            "language": "zh",
-            "duration": round(duration, 2),
-            "segments": all_segments
-        }
-
-    return await loop.run_in_executor(None, _run)
+    return {
+        "language": "zh",
+        "duration": round(duration, 2),
+        "segments": all_segments
+    }
 
 async def llm_process(transcript: dict) -> dict:
-    if not _DASHSCOPE_KEY:
-        transcript["llm_error"] = "未配置 DASHSCOPE_API_KEY，无法使用 AI 纠错和总结"
-        return transcript
-
     full_text = " ".join(s["text"] for s in transcript["segments"])
     from openai import OpenAI
-    client = OpenAI(
-        api_key=_DASHSCOPE_KEY,
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
-    )
+
+    if _LLM_PROVIDER == "deepseek":
+        client = OpenAI(
+            api_key=_DEEPSEEK_KEY,
+            base_url="https://api.deepseek.com/v1"
+        )
+        llm_model = "deepseek-chat"
+    elif _DASHSCOPE_KEY:
+        client = OpenAI(
+            api_key=_DASHSCOPE_KEY,
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
+        llm_model = "qwen-turbo"
+    else:
+        transcript["llm_error"] = "未配置 API Key（需要 DASHSCOPE_API_KEY 或 DEEPSEEK_API_KEY）"
+        return transcript
+
     async def correct():
         resp = await asyncio.to_thread(
             client.chat.completions.create,
-            model="qwen-turbo",
+            model=llm_model,
             messages=[
                 {"role": "system", "content": "你是一个语音转写文字校对专家。请纠正以下ASR转写文本中的错误（专有名词、同音字等），保持原意和口语风格不变。只返回纠正后的文本。"},
                 {"role": "user", "content": full_text[:3000]}
@@ -342,7 +305,7 @@ async def llm_process(transcript: dict) -> dict:
     async def summarize():
         resp = await asyncio.to_thread(
             client.chat.completions.create,
-            model="qwen-turbo",
+            model=llm_model,
             messages=[
                 {"role": "system", "content": "请用中文总结以下视频/播客内容的要点，分点列出，简洁明了。"},
                 {"role": "user", "content": full_text[:4000]}
@@ -970,6 +933,19 @@ async def login(data: dict):
 async def me(username: str = Depends(get_current_user)):
     return {"username": username}
 
+# 临时音频文件服务（供百炼 ASR 下载）
+@app.get("/temp_audio/{filename}")
+async def temp_audio(filename: str):
+    from fastapi.responses import FileResponse
+    file_path = UPLOAD_DIR / filename
+    if file_path.exists():
+        return FileResponse(str(file_path), media_type="audio/wav")
+    # 也在 results 目录找
+    file_path = RESULTS_DIR / filename
+    if file_path.exists():
+        return FileResponse(str(file_path), media_type="audio/wav")
+    raise HTTPException(404, "音频文件不存在或已过期")
+
 @app.get("/")
 async def root():
     html_path = STATIC_DIR / "index.html"
@@ -1305,4 +1281,4 @@ async def add_key(key: str = Query(...), name: str = Query(...)):
 # ============================================================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9000)
+    uvicorn.run(app, host="127.0.0.1", port=9000)
