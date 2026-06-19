@@ -199,12 +199,15 @@ async def transcribe_audio(audio_path: Path) -> dict:
     # 构建文件公开 URL（DashScope API 需要可下载的 HTTP 地址）
     filename = audio_path.name
     # 兼容文件在 UPLOAD_DIR 子目录的情况（URL下载任务）
+    import urllib.parse
     try:
         relative = audio_path.relative_to(UPLOAD_DIR)
         temp_path = str(relative)
     except ValueError:
         temp_path = filename
-    public_url = f"{_PUBLIC_BASE_URL}/temp_audio/{temp_path}"
+    # URL编码（中文/空格等特殊字符会破坏URL）
+    encoded_path = urllib.parse.quote(temp_path, safe='/')
+    public_url = f"{_PUBLIC_BASE_URL}/temp_audio/{encoded_path}"
 
     import dashscope
     from dashscope.audio.asr import Transcription
