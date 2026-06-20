@@ -450,17 +450,17 @@ function showPaymentModal(order) {
             stripeBtn.onclick = () => { window.open(order.payment_url, '_blank'); };
         }
     } else {
-        // 无支付渠道时显示提示
-        stripeBtn.style.display = 'block';
-        stripeBtn.textContent = '⚠️ 支付暂未开放';
-        stripeBtn.disabled = true;
-        stripeBtn.style.opacity = '0.5';
-        stripeBtn.style.cursor = 'not-allowed';
-        // 显示联系管理员提示
+        // 无支付配置时隐藏按钮，只显示提示
+        stripeBtn.style.display = 'none';
         const detailDiv = $('payment-detail');
-        detailDiv.innerHTML += `
-            <div class="msg-error" style="margin-top:10px">
-                在线支付尚未配置。如需购买额度，请联系管理员手动充值。
+        detailDiv.innerHTML = `
+            <div class="order-detail">
+                <div class="order-row"><span>套餐</span><span>${order.package_name}</span></div>
+                <div class="order-row"><span>金额</span><span class="order-price">¥${order.amount_yuan}</span></div>
+                <div class="order-row"><span>状态</span><span class="payment-status pending">⏳ 待支付</span></div>
+            </div>
+            <div class="msg-info" style="margin-top:10px;padding:12px;background:var(--accent-soft);border-radius:8px;text-align:center;font-size:.85rem;color:var(--text-muted)">
+                💡 支付功能开发中，当前使用免费额度+签到即可
             </div>
         `;
     }
