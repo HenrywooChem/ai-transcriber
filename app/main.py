@@ -30,7 +30,7 @@ _DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 _LLM_PROVIDER = "deepseek" if _DEEPSEEK_KEY else ("dashscope" if _DASHSCOPE_KEY else "none")
 
 # 外部可访问的基础URL（用于 ASR API 下载音频文件）
-_PUBLIC_BASE_URL = "http://124.221.77.205:8000"
+_PUBLIC_BASE_URL = "https://ai4u.site"
 
 # ============================================================
 # 配置
@@ -135,6 +135,279 @@ def verify_token(token: str) -> str | None:
         return None
 
 init_users_db()
+
+# ============================================================
+# 用户额度系统（每月免费30分钟 + 每日签到+5分钟）
+# ============================================================
+MONTHLY_FREE_MINUTES = 30   # 每月免费30分钟
+CHECKIN_BONUS_MINUTES = 5   # 每日签到加5分钟
+
+def get_current_month() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m")
+
+def get_today() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d")
+
+def init_quota_db():
+    """初始化额度表和支付订单表"""
+    conn = sqlite3.connect(str(USERS_DB))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_quota (
+            username TEXT PRIMARY KEY,
+            month TEXT NOT NULL,
+            used_seconds REAL DEFAULT 0,
+            bonus_seconds REAL DEFAULT 0,
+            last_checkin_date TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS payment_orders (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            package_name TEXT NOT NULL,
+            amount_cents INTEGER NOT NULL,
+            extra_seconds REAL NOT NULL,
+            currency TEXT DEFAULT 'cny',
+            status TEXT DEFAULT 'pending',
+            stripe_session_id TEXT,
+            created_at REAL,
+            paid_at REAL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_quota_db()
+
+def get_user_quota(username: str) -> dict:
+    """获取用户当月额度详情"""
+    conn = sqlite3.connect(str(USERS_DB))
+    month = get_current_month()
+    row = conn.execute(
+        "SELECT used_seconds, bonus_seconds, last_checkin_date FROM user_quota WHERE username=? AND month=?",
+        (username, month)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return {
+            "month": month,
+            "free_seconds": MONTHLY_FREE_MINUTES * 60,
+            "bonus_seconds": 0,
+            "used_seconds": 0,
+            "last_checkin_date": None,
+            "can_checkin": True,
+        }
+    used_secs = row[0] or 0
+    bonus_secs = row[1] or 0
+    last_checkin = row[2]
+    free_secs = MONTHLY_FREE_MINUTES * 60
+    total_available = free_secs + bonus_secs - used_secs
+    today = get_today()
+    can_checkin = (last_checkin != today)
+    return {
+        "month": month,
+        "free_seconds": free_secs,
+        "bonus_seconds": bonus_secs,
+        "used_seconds": used_secs,
+        "available_seconds": max(0, total_available),
+        "total_seconds": free_secs + bonus_secs,
+        "last_checkin_date": last_checkin,
+        "can_checkin": can_checkin,
+    }
+
+def do_checkin(username: str) -> dict:
+    """每日签到，奖励 5 分钟"""
+    conn = sqlite3.connect(str(USERS_DB))
+    month = get_current_month()
+    today = get_today()
+    row = conn.execute(
+        "SELECT bonus_seconds, last_checkin_date FROM user_quota WHERE username=? AND month=?",
+        (username, month)
+    ).fetchone()
+    if row:
+        last_date = row[1]
+        if last_date == today:
+            conn.close()
+            return {"success": False, "message": "今天已经签到过了"}
+        new_bonus = (row[0] or 0) + CHECKIN_BONUS_MINUTES * 60
+        conn.execute(
+            "UPDATE user_quota SET bonus_seconds=?, last_checkin_date=? WHERE username=? AND month=?",
+            (new_bonus, today, username, month)
+        )
+    else:
+        new_bonus = CHECKIN_BONUS_MINUTES * 60
+        conn.execute(
+            "INSERT INTO user_quota (username, month, bonus_seconds, last_checkin_date) VALUES (?, ?, ?, ?)",
+            (username, month, new_bonus, today)
+        )
+    conn.commit()
+    conn.close()
+    return {"success": True, "message": f"签到成功！+{CHECKIN_BONUS_MINUTES}分钟额度", "bonus_seconds": new_bonus}
+
+def deduct_quota(username: str, seconds: float):
+    """扣除用户额度（转录完成时调用）"""
+    conn = sqlite3.connect(str(USERS_DB))
+    month = get_current_month()
+    row = conn.execute(
+        "SELECT used_seconds FROM user_quota WHERE username=? AND month=?",
+        (username, month)
+    ).fetchone()
+    if row:
+        new_used = (row[0] or 0) + seconds
+        conn.execute(
+            "UPDATE user_quota SET used_seconds=? WHERE username=? AND month=?",
+            (new_used, username, month)
+        )
+    else:
+        conn.execute(
+            "INSERT INTO user_quota (username, month, used_seconds) VALUES (?, ?, ?)",
+            (username, month, seconds)
+        )
+    conn.commit()
+    conn.close()
+
+def create_payment_order(username: str, package_name: str, amount_cents: int, extra_seconds: float) -> dict:
+    """创建支付订单（优先虎皮椒微信支付，备选Stripe）"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from xunhupay import create_order as xh_create, is_configured as xh_configured
+
+    order_id = uuid.uuid4().hex[:12]
+    conn = sqlite3.connect(str(USERS_DB))
+    conn.execute(
+        "INSERT INTO payment_orders (id, username, package_name, amount_cents, extra_seconds, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (order_id, username, package_name, amount_cents, extra_seconds, time.time())
+    )
+    conn.commit()
+    conn.close()
+
+    payment_url = None
+    payment_qrcode = None
+    payment_method = None
+
+    # 1) 优先虎皮椒微信支付
+    if xh_configured():
+        try:
+            amount_yuan = round(amount_cents / 100, 2)
+            xh_resp = xh_create(
+                trade_order_id=order_id,
+                total_fee=amount_yuan,
+                title=package_name,
+                notify_url=f"{_PUBLIC_BASE_URL}/api/payment/xunhupay-notify",
+                return_url=f"{_PUBLIC_BASE_URL}/?payment_success={order_id}",
+            )
+            if xh_resp.get("errcode") == 0:
+                payment_url = xh_resp.get("url") or xh_resp.get("url_qrcode")
+                payment_qrcode = xh_resp.get("url_qrcode")
+                payment_method = "xunhupay"
+                print(f"[Payment] 虎皮椒订单 {order_id} 已创建, 金额 {amount_yuan}元")
+        except Exception as e:
+            print(f"[Payment] 虎皮椒下单失败: {e}")
+
+    # 2) 备选 Stripe
+    if not payment_method:
+        stripe_key = os.environ.get("STRIPE_API_KEY", "")
+        if stripe_key:
+            try:
+                import stripe
+                stripe.api_key = stripe_key
+                session = stripe.checkout.Session.create(
+                    payment_method_types=['card'],
+                    line_items=[{
+                        'price_data': {
+                            'currency': 'cny',
+                            'product_data': {'name': package_name},
+                            'unit_amount': amount_cents,
+                        },
+                        'quantity': 1,
+                    }],
+                    mode='payment',
+                    success_url=f"{_PUBLIC_BASE_URL}/?payment_success={order_id}",
+                    cancel_url=f"{_PUBLIC_BASE_URL}/?payment_cancelled=1",
+                    metadata={'order_id': order_id, 'username': username}
+                )
+                payment_url = session.url
+                payment_method = "stripe"
+                conn = sqlite3.connect(str(USERS_DB))
+                conn.execute(
+                    "UPDATE payment_orders SET stripe_session_id=? WHERE id=?",
+                    (session.id, order_id)
+                )
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"[Payment] Stripe error: {e}")
+
+    return {
+        "order_id": order_id,
+        "amount_cents": amount_cents,
+        "amount_yuan": round(amount_cents / 100, 2),
+        "package_name": package_name,
+        "extra_seconds": extra_seconds,
+        "payment_url": payment_url,
+        "payment_qrcode": payment_qrcode,
+        "payment_method": payment_method,
+        "status": "pending",
+    }
+
+def get_user_payment_history(username: str, limit: int = 10) -> list:
+    """获取用户支付历史"""
+    conn = sqlite3.connect(str(USERS_DB))
+    rows = conn.execute(
+        "SELECT id, package_name, amount_cents, extra_seconds, status, created_at, paid_at FROM payment_orders WHERE username=? ORDER BY created_at DESC LIMIT ?",
+        (username, limit)
+    ).fetchall()
+    conn.close()
+    return [{
+        "order_id": r[0],
+        "package_name": r[1],
+        "amount_yuan": round(r[2] / 100, 2),
+        "extra_minutes": round(r[3] / 60, 1),
+        "status": r[4],
+        "created_at": r[5],
+        "paid_at": r[6],
+    } for r in rows]
+
+def confirm_payment_order(order_id: str):
+    """确认订单已支付，为用户增加额度"""
+    conn = sqlite3.connect(str(USERS_DB))
+    row = conn.execute(
+        "SELECT username, extra_seconds FROM payment_orders WHERE id=? AND status='pending'",
+        (order_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    username, extra_seconds = row
+    # 加为 bonus (可跨月使用? 直接加到当月bonus)
+    month = get_current_month()
+    quota_row = conn.execute(
+        "SELECT bonus_seconds FROM user_quota WHERE username=? AND month=?",
+        (username, month)
+    ).fetchone()
+    if quota_row:
+        new_bonus = (quota_row[0] or 0) + extra_seconds
+        conn.execute(
+            "UPDATE user_quota SET bonus_seconds=? WHERE username=? AND month=?",
+            (new_bonus, username, month)
+        )
+    else:
+        conn.execute(
+            "INSERT INTO user_quota (username, month, bonus_seconds) VALUES (?, ?, ?)",
+            (username, month, extra_seconds)
+        )
+    conn.execute(
+        "UPDATE payment_orders SET status='paid', paid_at=? WHERE id=?",
+        (time.time(), order_id)
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+# Stripe Webhook 签名密钥（可选）
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
 async def get_current_user(request: Request):
     """从 Authorization header 获取当前登录用户"""
@@ -836,7 +1109,7 @@ def segments_to_srt(segments: list) -> str:
 # ============================================================
 bg_tasks_set = set()
 
-async def run_file_task(task_id: str, audio_path: Path, use_llm: bool):
+async def run_file_task(task_id: str, audio_path: Path, use_llm: bool, username: str = None):
     try:
         tasks[task_id].update({"status": "transcribing", "progress": 30, "message": "🎙️ 正在语音转文字..."})
         save_tasks()
@@ -856,6 +1129,13 @@ async def run_file_task(task_id: str, audio_path: Path, use_llm: bool):
                 tasks[task_id].update({"message": f"转录完成，AI处理失败: {str(llm_err)[:100]}"})
 
         tasks[task_id].update({"status": "completed", "progress": 100, "message": "✅ 完成", "result": transcript})
+
+        # 扣除用户额度
+        if username and not tasks[task_id].get("api_key_name"):
+            duration = transcript.get("duration", 0)
+            if duration > 0:
+                deduct_quota(username, duration)
+                tasks[task_id]["quota_deducted"] = round(duration, 1)
     except Exception as e:
         tasks[task_id].update({"status": "failed", "message": str(e), "error": str(e)})
     finally:
@@ -864,7 +1144,7 @@ async def run_file_task(task_id: str, audio_path: Path, use_llm: bool):
         if audio_path.exists():
             audio_path.unlink()
 
-async def run_url_task(task_id: str, url: str, use_llm: bool):
+async def run_url_task(task_id: str, url: str, use_llm: bool, username: str = None):
     download_dir = UPLOAD_DIR / task_id
     download_dir.mkdir(exist_ok=True)
     try:
@@ -893,6 +1173,13 @@ async def run_url_task(task_id: str, url: str, use_llm: bool):
         # 提取视频标题
         title = audio_path.stem if audio_path else url
         tasks[task_id].update({"status": "completed", "progress": 100, "message": "✅ 完成", "result": transcript, "title": title})
+
+        # 扣除用户额度
+        if username and not tasks[task_id].get("api_key_name"):
+            duration = transcript.get("duration", 0)
+            if duration > 0:
+                deduct_quota(username, duration)
+                tasks[task_id]["quota_deducted"] = round(duration, 1)
     except Exception as e:
         tasks[task_id].update({"status": "failed", "message": str(e), "error": str(e)})
     finally:
@@ -942,6 +1229,168 @@ async def login(data: dict):
 async def me(username: str = Depends(get_current_user)):
     return {"username": username}
 
+# ============================================================
+# 额度 & 签到 API
+# ============================================================
+@app.get("/api/quota")
+async def api_quota(username: str = Depends(get_current_user)):
+    """获取用户当月额度信息"""
+    quota = get_user_quota(username)
+    quota["username"] = username
+    quota["free_minutes"] = MONTHLY_FREE_MINUTES
+    quota["checkin_bonus_minutes"] = CHECKIN_BONUS_MINUTES
+    quota["available_minutes"] = round(quota["available_seconds"] / 60, 1)
+    quota["used_minutes"] = round(quota["used_seconds"] / 60, 1)
+    return quota
+
+@app.post("/api/checkin")
+async def api_checkin(username: str = Depends(get_current_user)):
+    """每日签到"""
+    return do_checkin(username)
+
+@app.get("/api/quota/pricing")
+async def api_pricing():
+    """获取价格套餐"""
+    return {
+        "monthly_free_minutes": MONTHLY_FREE_MINUTES,
+        "checkin_bonus_minutes": CHECKIN_BONUS_MINUTES,
+        "packages": [
+            {"name": "60分钟包", "minutes": 60, "price_yuan": 6, "price_cents": 600},
+            {"name": "300分钟包", "minutes": 300, "price_yuan": 25, "price_cents": 2500},
+            {"name": "无限月卡", "minutes": 99999, "price_yuan": 49, "price_cents": 4900},
+        ],
+        "currency": "CNY",
+    }
+
+# ============================================================
+# 支付 API
+# ============================================================
+@app.post("/api/payment/create-order")
+async def api_create_order(data: dict, username: str = Depends(get_current_user)):
+    """创建支付订单"""
+    package_minutes = int(data.get("minutes", 60))
+    # 查找匹配的套餐
+    pricing = [
+        {"name": "60分钟包", "minutes": 60, "price_cents": 600},
+        {"name": "300分钟包", "minutes": 300, "price_cents": 2500},
+        {"name": "无限月卡", "minutes": 99999, "price_cents": 4900},
+    ]
+    pkg = None
+    for p in pricing:
+        if p["minutes"] == package_minutes:
+            pkg = p
+            break
+    if not pkg:
+        # 自定义套餐：1元=10分钟
+        package_minutes = max(10, package_minutes)
+        amount_cents = package_minutes * 10  # 1元=10分钟 → 1分钟=10分钱=10cents
+        pkg = {"name": f"{package_minutes}分钟", "minutes": package_minutes, "price_cents": amount_cents}
+    return create_payment_order(username, pkg["name"], pkg["price_cents"], pkg["minutes"] * 60.0)
+
+@app.get("/api/payment/order/{order_id}")
+async def api_order_status(order_id: str, username: str = Depends(get_current_user)):
+    """查询订单状态"""
+    conn = sqlite3.connect(str(USERS_DB))
+    row = conn.execute(
+        "SELECT id, package_name, amount_cents, extra_seconds, status, stripe_session_id, created_at, paid_at FROM payment_orders WHERE id=? AND username=?",
+        (order_id, username)
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "订单不存在")
+    return {
+        "order_id": row[0],
+        "package_name": row[1],
+        "amount_yuan": round(row[2] / 100, 2),
+        "extra_minutes": round(row[3] / 60, 1),
+        "status": row[4],
+        "stripe_session_id": row[5],
+        "created_at": row[6],
+        "paid_at": row[7],
+    }
+
+@app.get("/api/payment/history")
+async def api_payment_history(username: str = Depends(get_current_user)):
+    """支付历史"""
+    return get_user_payment_history(username)
+
+@app.post("/api/payment/webhook")
+async def api_stripe_webhook(request: Request):
+    """Stripe Webhook: 支付成功回调"""
+    import stripe
+    stripe_key = os.environ.get("STRIPE_API_KEY", "")
+    if not stripe_key:
+        raise HTTPException(400, "未配置 Stripe")
+    stripe.api_key = stripe_key
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+    try:
+        if STRIPE_WEBHOOK_SECRET:
+            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+        else:
+            # 无签名验证（测试环境安全降级）
+            event = json.loads(payload)
+    except (ValueError, stripe.error.SignatureVerificationError) as e:
+        raise HTTPException(400, f"Webhook 验证失败: {e}")
+
+    if event.get("type") == "checkout.session.completed":
+        session = event["data"]["object"]
+        order_id = session.get("metadata", {}).get("order_id")
+        if order_id:
+            confirm_payment_order(order_id)
+            print(f"[Payment] Order {order_id} confirmed via webhook")
+    return {"status": "ok"}
+
+@app.post("/api/payment/confirm/{order_id}")
+async def api_manual_confirm(order_id: str, username: str = Depends(get_current_user)):
+    """手动确认订单（仅管理员可用）"""
+    conn = sqlite3.connect(str(USERS_DB))
+    row = conn.execute(
+        "SELECT is_admin FROM users WHERE username=?", (username,)
+    ).fetchone()
+    if not row or not row[0]:
+        raise HTTPException(403, "仅管理员可手动确认订单，请使用在线支付")
+    conn.close()
+    if not confirm_payment_order(order_id):
+        raise HTTPException(400, "订单不存在或已处理")
+    return {"success": True, "message": f"管理员已确认订单"}
+
+# ============================================================
+# 虎皮椒微信支付回调
+# ============================================================
+@app.post("/api/payment/xunhupay-notify")
+async def xunhupay_notify(request: Request):
+    """虎皮椒支付异步通知"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from xunhupay import verify_notify
+
+    form_data = await request.form()
+    data = dict(form_data)
+
+    if not verify_notify(data):
+        return "fail"
+
+    trade_order_id = data.get("trade_order_id", "")
+    status = data.get("status", "")
+    if status == "OD" and trade_order_id:  # OD = 已支付
+        confirm_payment_order(trade_order_id)
+        print(f"[Payment] 虎皮椒回调确认: {trade_order_id}")
+
+    return "success"  # 虎皮椒要求返回纯文本 success
+
+# ============================================================
+# 额度校验中间件（转录前检查）
+# ============================================================
+async def require_quota(username: str):
+    """转录开始前检查用户是否有余量"""
+    quota = get_user_quota(username)
+    if quota["available_seconds"] <= 0:
+        raise HTTPException(402,
+            "本月免费额度已用尽，请签到获取额外额度，或购买套餐。"
+        )
+    return True
+
 # 临时音频文件服务（供百炼 ASR 下载）
 @app.get("/temp_audio/{path:path}")
 async def temp_audio(path: str):
@@ -984,6 +1433,10 @@ async def transcribe_upload(
     if key_name is None and len(API_KEYS) > 1:
         raise HTTPException(401, "需要有效的 API Key (通过 X-API-Key 请求头或 ?key= 参数)")
 
+    # 检查额度（仅对普通用户）
+    if not key_name:
+        await require_quota(user)
+
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(413, f"文件过大，最大支持 {MAX_FILE_SIZE // 1024 // 1024}MB")
@@ -997,11 +1450,11 @@ async def transcribe_upload(
         "id": task_id, "url": f"upload://{file.filename}",
         "status": "queued", "progress": 0, "message": "⏳ 排队中",
         "created_at": time.time(), "result": None, "error": None,
-        "mode": "upload", "use_llm": use_llm, "user": key_name or "anonymous"
+        "mode": "upload", "use_llm": use_llm, "user": user, "api_key_name": key_name
     }
     save_tasks()
 
-    t = asyncio.create_task(run_file_task(task_id, save_path, use_llm))
+    t = asyncio.create_task(run_file_task(task_id, save_path, use_llm, user))
     bg_tasks_set.add(task_id)
     return {"task_id": task_id, "status": "queued", "filename": file.filename, "file_size": len(content)}
 
@@ -1015,6 +1468,10 @@ async def transcribe_url(
     key_name = verify_key(request)
     if key_name is None and len(API_KEYS) > 1:
         raise HTTPException(401, "需要有效的 API Key")
+
+    # 检查额度（仅对普通用户）
+    if not key_name:
+        await require_quota(user)
 
     url = data.get("url", "").strip()
     # 从包含标题的粘贴文本中提取实际 URL
@@ -1039,11 +1496,11 @@ async def transcribe_url(
         "id": task_id, "url": url, "platform": platform,
         "status": "queued", "progress": 0, "message": "⏳ 排队中",
         "created_at": time.time(), "result": None, "error": None,
-        "mode": "url", "use_llm": use_llm, "user": key_name or "anonymous"
+        "mode": "url", "use_llm": use_llm, "user": user, "api_key_name": key_name
     }
     save_tasks()
 
-    t = asyncio.create_task(run_url_task(task_id, url, use_llm))
+    t = asyncio.create_task(run_url_task(task_id, url, use_llm, user))
     bg_tasks_set.add(task_id)
     return {"task_id": task_id, "status": "queued", "url": url, "platform": platform}
 

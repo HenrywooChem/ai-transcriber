@@ -16,6 +16,13 @@
         <a onclick="document.getElementById('transcribe-section').scrollIntoView({behavior:'smooth'})">开始转录</a>
         <a onclick="document.getElementById('history-section').scrollIntoView({behavior:'smooth'})">历史记录</a>
     </div>
+    <div id="quota-area" class="quota-area" style="display:none">
+        <span class="quota-badge" onclick="showPricingModal()" title="点击查看额度详情">
+            <span id="quota-icon">⏱</span>
+            <span id="quota-text">加载中</span>
+        </span>
+        <button id="checkin-btn" class="btn btn-sm btn-checkin" type="button" onclick="doCheckin()" style="display:none">✅ 签到</button>
+    </div>
     <div id="auth-area" class="auth-area">
         <button id="login-btn" class="btn btn-sm btn-primary" type="button" onclick="showLoginModal()">登录</button>
     </div>
@@ -31,6 +38,7 @@
         <div class="feature-item"><span class="icon green">✓</span> AI 内容总结</div>
         <div class="feature-item"><span class="icon green">✓</span> SRT 字幕导出</div>
         <div class="feature-item"><span class="icon green">✓</span> 文件/B站/YouTube</div>
+        <div class="feature-item"><span class="icon green">🎁</span> 每月30分钟免费</div>
     </div>
 </section>
 
@@ -154,9 +162,43 @@
     </div>
 </div>
 
+<!-- ============ 额度/套餐弹窗 ============ -->
+<div id="pricing-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)hidePricingModal()">
+    <div class="modal-card modal-card-wide">
+        <button class="modal-close" onclick="hidePricingModal()">&times;</button>
+        <h3 style="margin-bottom:16px">📊 我的额度</h3>
+        <div id="quota-detail" class="quota-detail">
+            <div class="quota-loading">加载中...</div>
+        </div>
+        <div style="margin-bottom:12px">
+            <button id="checkin-btn-inline" class="btn btn-sm btn-checkin" type="button" onclick="doCheckin()">✅ 每日签到 +5分钟</button>
+        </div>
+        <h3 style="margin:20px 0 12px">💎 购买套餐</h3>
+        <div id="pkg-list" class="pkg-list"></div>
+        <div id="payment-result" class="payment-result" style="display:none"></div>
+        <h3 style="margin:20px 0 12px">📜 充值记录</h3>
+        <div id="payment-history" class="payment-history">
+            <div class="empty-state">暂无充值记录</div>
+        </div>
+    </div>
+</div>
+
+<!-- ============ 支付确认弹窗 ============ -->
+<div id="payment-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)hidePaymentModal()">
+    <div class="modal-card">
+        <button class="modal-close" onclick="hidePaymentModal()">&times;</button>
+        <h3 id="payment-modal-title" style="margin-bottom:16px">确认订单</h3>
+        <div id="payment-detail" class="payment-detail"></div>
+        <div style="display:flex;gap:10px;margin-top:16px">
+            <button id="pay-stripe-btn" class="btn btn-primary" style="flex:1" type="button">💳 去支付</button>
+        </div>
+        <div id="payment-error" class="msg-error" style="display:none;margin-top:10px"></div>
+    </div>
+</div>
+
 <!-- ============ 页脚 ============ -->
 <footer class="footer container">
-    <p>转录助手 · FunASR + AI 纠错 · 支持 B站/YouTube 链接转录</p>
+    <p>转录助手 · FunASR + AI 纠错 · 支持 B站/YouTube 链接转录 | 🎁 新用户每月30分钟免费</p>
 </footer>
 
 <!-- ============ 消息提示 ============ -->

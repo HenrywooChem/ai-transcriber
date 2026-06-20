@@ -1,5 +1,5 @@
 /* =============================================
-   视频转录服务 - 前端逻辑（含用户认证）
+   视频转录服务 - 前端逻辑（含用户认证 + 额度 + 签到 + 支付）
    ============================================= */
 
 // ============ 认证状态 ============
@@ -32,7 +32,6 @@ async function authFetch(url, options = {}) {
         headers['Authorization'] = 'Bearer ' + authToken;
     }
     if (!options.method || options.method === 'GET') {
-        // 对于 GET 请求，不设置 Content-Type，JSON Body 也不该有
         options.headers = headers;
     } else if (options.body && typeof options.body === 'string') {
         headers['Content-Type'] = 'application/json';
@@ -42,7 +41,6 @@ async function authFetch(url, options = {}) {
     }
     const res = await fetch(url, options);
     if (res.status === 401) {
-        // Token 过期，清除登录状态
         clearAuth();
         updateAuthUI();
         showLoginModal();
@@ -54,6 +52,7 @@ async function authFetch(url, options = {}) {
 // ============ 状态 ============
 let pollTimer = null;
 let currentTaskId = null;
+let quotaTimer = null;
 
 // ============ DOM 引用 ============
 const $ = id => document.getElementById(id);
@@ -93,16 +92,9 @@ const el = {
     toastMsg: $('toast-msg'),
 
     authArea: $('auth-area'),
-    loginBtn: $('login-btn'),
-
-    authModal: $('auth-modal'),
-    loginUsername: $('login-username'),
-    loginPassword: $('login-password'),
-    loginError: $('login-error'),
-    regUsername: $('reg-username'),
-    regPassword: $('reg-password'),
-    regConfirm: $('reg-confirm'),
-    regError: $('reg-error'),
+    quotaArea: $('quota-area'),
+    quotaText: $('quota-text'),
+    checkinBtn: $('checkin-btn'),
 };
 
 // ============ 认证 UI ============
@@ -117,21 +109,29 @@ function updateAuthUI() {
                 <span class="logout-link" onclick="doLogout()">退出</span>
             </div>
         `;
+        // 显示额度区域
+        if (el.quotaArea) el.quotaArea.style.display = 'inline-flex';
+        loadQuota();
+        // 启动自动刷新（每60秒）
+        if (quotaTimer) clearInterval(quotaTimer);
+        quotaTimer = setInterval(loadQuota, 60000);
     } else {
         el.authArea.innerHTML = '<button id="login-btn" class="btn btn-sm btn-primary" type="button" onclick="showLoginModal()">登录</button>';
+        if (el.quotaArea) el.quotaArea.style.display = 'none';
+        if (quotaTimer) { clearInterval(quotaTimer); quotaTimer = null; }
     }
 }
 
 function showLoginModal() {
-    el.authModal.style.display = 'flex';
+    $('auth-modal').style.display = 'flex';
     switchAuthTab('login');
-    el.loginUsername.value = '';
-    el.loginPassword.value = '';
-    el.loginError.style.display = 'none';
+    $('login-username').value = '';
+    $('login-password').value = '';
+    $('login-error').style.display = 'none';
 }
 
 function hideAuthModal() {
-    el.authModal.style.display = 'none';
+    $('auth-modal').style.display = 'none';
 }
 
 function switchAuthTab(name) {
@@ -142,14 +142,14 @@ function switchAuthTab(name) {
 }
 
 async function doLogin() {
-    const username = el.loginUsername.value.trim();
-    const password = el.loginPassword.value;
+    const username = $('login-username').value.trim();
+    const password = $('login-password').value;
     if (!username || !password) {
-        el.loginError.textContent = '❌ 请输入用户名和密码';
-        el.loginError.style.display = 'block';
+        $('login-error').textContent = '❌ 请输入用户名和密码';
+        $('login-error').style.display = 'block';
         return;
     }
-    el.loginError.style.display = 'none';
+    $('login-error').style.display = 'none';
     try {
         const res = await fetch('/api/auth/login', {
             method: 'POST',
@@ -163,31 +163,31 @@ async function doLogin() {
         hideAuthModal();
         showToast('✅ 登录成功，欢迎回来！', 'success');
     } catch (err) {
-        el.loginError.textContent = '❌ ' + err.message;
-        el.loginError.style.display = 'block';
+        $('login-error').textContent = '❌ ' + err.message;
+        $('login-error').style.display = 'block';
     }
 }
 
 async function doRegister() {
-    const username = el.regUsername.value.trim();
-    const password = el.regPassword.value;
-    const confirm = el.regConfirm.value;
+    const username = $('reg-username').value.trim();
+    const password = $('reg-password').value;
+    const confirm = $('reg-confirm').value;
     if (!username || !password) {
-        el.regError.textContent = '❌ 请填写用户名和密码';
-        el.regError.style.display = 'block';
+        $('reg-error').textContent = '❌ 请填写用户名和密码';
+        $('reg-error').style.display = 'block';
         return;
     }
     if (password.length < 4) {
-        el.regError.textContent = '❌ 密码至少4个字符';
-        el.regError.style.display = 'block';
+        $('reg-error').textContent = '❌ 密码至少4个字符';
+        $('reg-error').style.display = 'block';
         return;
     }
     if (password !== confirm) {
-        el.regError.textContent = '❌ 两次密码不一致';
-        el.regError.style.display = 'block';
+        $('reg-error').textContent = '❌ 两次密码不一致';
+        $('reg-error').style.display = 'block';
         return;
     }
-    el.regError.style.display = 'none';
+    $('reg-error').style.display = 'none';
     try {
         const res = await fetch('/api/auth/register', {
             method: 'POST',
@@ -199,10 +199,10 @@ async function doRegister() {
         saveAuth(data.token, data.username);
         updateAuthUI();
         hideAuthModal();
-        showToast('🎉 注册成功！', 'success');
+        showToast('🎉 注册成功！每月30分钟免费额度已发放', 'success');
     } catch (err) {
-        el.regError.textContent = '❌ ' + err.message;
-        el.regError.style.display = 'block';
+        $('reg-error').textContent = '❌ ' + err.message;
+        $('reg-error').style.display = 'block';
     }
 }
 
@@ -214,12 +214,277 @@ function doLogout() {
 
 // Enter 键快捷登录/注册
 document.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && el.authModal.style.display === 'flex') {
-        const loginActive = el.loginPassword.closest('.auth-panel.active');
+    if (e.key === 'Enter' && $('auth-modal').style.display === 'flex') {
+        const loginActive = $('login-password').closest('.auth-panel.active');
         if (loginActive) doLogin();
         else doRegister();
     }
 });
+
+// ============ 额度 & 签到 ============
+async function loadQuota() {
+    if (!isLoggedIn()) return;
+    try {
+        const res = await authFetch('/api/quota');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail);
+        updateQuotaUI(data);
+    } catch (err) {
+        if (el.quotaText) el.quotaText.textContent = '额度查询失败';
+    }
+}
+
+function updateQuotaUI(data) {
+    if (!el.quotaText) return;
+    const avail = data.available_minutes || 0;
+    const total = data.free_minutes || 30;
+    const bonus = Math.round((data.bonus_seconds || 0) / 60);
+    const used = data.used_minutes || 0;
+
+    // 导航栏显示
+    let color = '#22c55e';
+    if (avail < 5) color = '#ef4444';
+    else if (avail < 15) color = '#f59e0b';
+    const icon = avail <= 0 ? '⚠️' : '⏱';
+    el.quotaText.innerHTML = `${icon} <span style="color:${color};font-weight:700">${avail.toFixed(1)}</span> 分钟`;
+
+    // 签到按钮状态
+    const checkinBtn = el.checkinBtn;
+    const checkinBtnInline = $('checkin-btn-inline');
+    if (data.can_checkin) {
+        if (checkinBtn) { checkinBtn.style.display = 'inline-flex'; checkinBtn.textContent = '✅ 签到'; }
+        if (checkinBtnInline) { checkinBtnInline.style.display = 'inline-flex'; checkinBtnInline.textContent = '✅ 每日签到 +5分钟'; checkinBtnInline.disabled = false; }
+    } else {
+        if (checkinBtn) { checkinBtn.style.display = 'none'; }
+        if (checkinBtnInline) { checkinBtnInline.textContent = '✅ 今日已签到'; checkinBtnInline.disabled = true; checkinBtnInline.style.opacity = '0.5'; }
+    }
+
+    // 刷新额度详情（如果弹窗开着）
+    const quotaDetail = $('quota-detail');
+    if (quotaDetail && quotaDetail.querySelector('.quota-loading') === null) {
+        renderQuotaDetail(data);
+    }
+}
+
+async function doCheckin() {
+    if (!isLoggedIn()) { showLoginModal(); return; }
+    try {
+        const res = await authFetch('/api/checkin', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || '签到失败');
+        showToast('🎉 ' + data.message, 'success');
+        loadQuota();
+    } catch (err) {
+        showToast('❌ ' + err.message, 'error');
+    }
+}
+
+// ============ 套餐/额度弹窗 ============
+function showPricingModal() {
+    if (!isLoggedIn()) { showLoginModal(); return; }
+    const modal = $('pricing-modal');
+    modal.style.display = 'flex';
+
+    // 加载额度详情
+    loadQuotaDetail();
+
+    // 加载套餐
+    loadPackages();
+
+    // 加载充值记录
+    loadPaymentHistory();
+}
+
+function hidePricingModal() {
+    $('pricing-modal').style.display = 'none';
+}
+
+async function loadQuotaDetail() {
+    try {
+        const res = await authFetch('/api/quota');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail);
+        renderQuotaDetail(data);
+    } catch (err) {
+        $('quota-detail').innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
+function renderQuotaDetail(data) {
+    const bonus = Math.round((data.bonus_seconds || 0) / 60);
+    const used = data.used_minutes || 0;
+    const avail = data.available_minutes || 0;
+    const free = data.free_minutes || 30;
+    const total = free + bonus;
+    const pct = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
+
+    $('quota-detail').innerHTML = `
+        <div class="quota-bar-section">
+            <div class="quota-stats">
+                <span>📅 ${data.month}</span>
+                <span>已用 <strong>${used.toFixed(1)}</strong> / ${total} 分钟</span>
+                <span>剩余 <strong style="color:${avail < 5 ? '#ef4444' : avail < 15 ? '#f59e0b' : '#22c55e'}">${avail.toFixed(1)}</strong> 分钟</span>
+            </div>
+            <div class="progress-bar quota-progress-bar">
+                <div class="progress-fill" style="width:${pct}%;background:${pct > 80 ? '#ef4444' : pct > 50 ? '#f59e0b' : '#6c63ff'}"></div>
+            </div>
+            <div class="quota-breakdown">
+                <span>🎁 免费额度: ${free}分钟</span>
+                <span>🎯 签到奖励: +${bonus}分钟</span>
+                <span>⭐ 已用: ${used.toFixed(1)}分钟</span>
+            </div>
+        </div>
+    `;
+}
+
+async function loadPackages() {
+    try {
+        const res = await fetch('/api/quota/pricing');
+        const data = await res.json();
+        const pkgList = $('pkg-list');
+        let html = '';
+        data.packages.forEach(pkg => {
+            const isPopular = pkg.name === '300分钟包';
+            const isUnlimited = pkg.name === '无限月卡';
+            html += `
+                <div class="pkg-card ${isPopular ? 'popular' : ''}">
+                    ${isPopular ? '<div class="pkg-badge">推荐</div>' : ''}
+                    <div class="pkg-name">${pkg.name}</div>
+                    <div class="pkg-price">¥${pkg.price_yuan}</div>
+                    <div class="pkg-desc">${isUnlimited ? '当月不限量转录' : pkg.minutes + '分钟转录时长'}</div>
+                    <button class="btn btn-primary" onclick="buyPackage(${pkg.minutes})" type="button">
+                        ${isUnlimited ? '🚀 开通' : '💳 购买'}
+                    </button>
+                </div>
+            `;
+        });
+        pkgList.innerHTML = html;
+    } catch (err) {
+        $('pkg-list').innerHTML = '<div class="empty-state">加载套餐失败</div>';
+    }
+}
+
+async function loadPaymentHistory() {
+    try {
+        const res = await authFetch('/api/payment/history');
+        const data = await res.json();
+        const container = $('payment-history');
+        if (!data.length) {
+            container.innerHTML = '<div class="empty-state">暂无充值记录</div>';
+            return;
+        }
+        let html = '';
+        data.forEach(o => {
+            const statusText = o.status === 'paid' ? '✅ 已支付' : '⏳ 待支付';
+            const date = new Date((o.created_at || 0) * 1000).toLocaleDateString('zh-CN');
+            html += `<div class="payment-item">
+                <span>${o.package_name}</span>
+                <span>¥${o.amount_yuan}</span>
+                <span class="payment-status ${o.status}">${statusText}</span>
+                <span class="payment-date">${date}</span>
+            </div>`;
+        });
+        container.innerHTML = html;
+    } catch (err) {
+        // 静默失败
+    }
+}
+
+async function buyPackage(minutes) {
+    if (!isLoggedIn()) { showLoginModal(); return; }
+    try {
+        const res = await authFetch('/api/payment/create-order', {
+            method: 'POST',
+            body: JSON.stringify({ minutes })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || '创建订单失败');
+        // 显示支付弹窗
+        showPaymentModal(data);
+    } catch (err) {
+        showToast('❌ ' + err.message, 'error');
+    }
+}
+
+// ============ 支付弹窗 ============
+function showPaymentModal(order) {
+    $('payment-modal-title').textContent = `💳 订单 #${order.order_id.slice(0, 8)}`;
+    $('payment-detail').innerHTML = `
+        <div class="order-detail">
+            <div class="order-row"><span>套餐</span><span>${order.package_name}</span></div>
+            <div class="order-row"><span>金额</span><span class="order-price">¥${order.amount_yuan}</span></div>
+            <div class="order-row"><span>状态</span><span class="payment-status pending">⏳ 待支付</span></div>
+        </div>
+    `;
+    $('payment-error').style.display = 'none';
+
+    // Stripe 支付按钮
+    const stripeBtn = $('pay-stripe-btn');
+    if (order.payment_url) {
+        if (order.payment_method === 'xunhupay') {
+            // 虎皮椒微信支付 - 显示二维码+跳转链接
+            stripeBtn.style.display = 'block';
+            stripeBtn.textContent = '📱 微信扫码支付';
+            stripeBtn.onclick = () => { window.open(order.payment_url, '_blank'); };
+
+            if (order.payment_qrcode) {
+                // 使用第三方API生成二维码图片
+                const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(order.payment_qrcode)}`;
+                const detailDiv = $('payment-detail');
+                detailDiv.innerHTML = `
+                    <div class="order-detail">
+                        <div class="order-row"><span>套餐</span><span>${order.package_name}</span></div>
+                        <div class="order-row"><span>金额</span><span class="order-price">¥${order.amount_yuan}</span></div>
+                        <div class="order-row"><span>状态</span><span class="payment-status pending">⏳ 扫码支付</span></div>
+                    </div>
+                    <div style="text-align:center;margin-top:16px">
+                        <img src="${qrUrl}" alt="微信支付二维码" style="width:220px;height:220px;border-radius:12px;border:2px solid var(--border)">
+                        <p style="color:var(--text-muted);font-size:.85rem;margin-top:10px">📱 打开微信扫码支付</p>
+                    </div>
+                `;
+            }
+        } else {
+            // Stripe 支付
+            stripeBtn.style.display = 'block';
+            stripeBtn.textContent = '💳 去支付 (Stripe)';
+            stripeBtn.onclick = () => { window.open(order.payment_url, '_blank'); };
+        }
+    } else {
+        // 无支付渠道时显示提示
+        stripeBtn.style.display = 'block';
+        stripeBtn.textContent = '⚠️ 支付暂未开放';
+        stripeBtn.disabled = true;
+        stripeBtn.style.opacity = '0.5';
+        stripeBtn.style.cursor = 'not-allowed';
+        // 显示联系管理员提示
+        const detailDiv = $('payment-detail');
+        detailDiv.innerHTML += `
+            <div class="msg-error" style="margin-top:10px">
+                在线支付尚未配置。如需购买额度，请联系管理员手动充值。
+            </div>
+        `;
+    }
+
+    $('payment-modal').style.display = 'flex';
+}
+
+function hidePaymentModal() {
+    $('payment-modal').style.display = 'none';
+}
+
+// ============ 检测支付成功回跳 ============
+(function checkPaymentReturn() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('payment_success')) {
+        showToast('🎉 支付成功！额度已自动到账', 'success');
+        setTimeout(() => loadQuota(), 2000);
+        window.history.replaceState({}, document.title, window.location.pathname);
+    }
+    if (params.get('payment_cancelled')) {
+        showToast('❌ 支付取消', 'error');
+        window.history.replaceState({}, document.title, window.location.pathname);
+    }
+})();
 
 // ============ Toast ============
 function showToast(msg, type = '') {
@@ -335,6 +600,10 @@ el.uploadBtn.addEventListener('click', async () => {
         el.progressSection.classList.remove('active');
         if (err.message !== '登录已过期，请重新登录') {
             showError(el.uploadError, err.message);
+            // 如果额度不足，提示去购买
+            if (err.message.includes('额度已用尽') || err.message.includes('402')) {
+                showToast('💡 可去签到获取额外额度或购买套餐', '');
+            }
         }
     }
 });
@@ -385,6 +654,9 @@ el.urlBtn.addEventListener('click', async () => {
         el.progressSection.classList.remove('active');
         if (err.message !== '登录已过期，请重新登录') {
             showError(el.urlError, err.message);
+            if (err.message.includes('额度已用尽') || err.message.includes('402')) {
+                showToast('💡 可去签到获取额外额度或购买套餐', '');
+            }
         }
     }
 });
@@ -420,6 +692,8 @@ function startPolling(taskId) {
                 showResult(data.result || data);
                 showToast('✅ 转录完成！', 'success');
                 loadHistory();
+                // 刷新额度（刚刚扣除了）
+                loadQuota();
             } else if (data.status === 'failed') {
                 clearInterval(pollTimer);
                 pollTimer = null;
@@ -455,6 +729,11 @@ function showResult(data) {
 
     const title = data.title || '转录结果';
     el.resultTitle.textContent = `📝 ${title}`;
+
+    // 如果已扣除额度，显示在结果区域
+    if (data.quota_deducted) {
+        el.resultTitle.textContent += ` ⏱ -${data.quota_deducted.toFixed(0)}秒`;
+    }
 
     const segs = result.segments;
     let segHtml = '';
