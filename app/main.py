@@ -1525,8 +1525,10 @@ async def get_task(task_id: str):
     return resp
 
 @app.get("/api/tasks")
-async def list_tasks(limit: int = 30):
-    sorted_tasks = sorted(tasks.values(), key=lambda t: t.get("created_at", 0), reverse=True)[:limit]
+async def list_tasks(limit: int = 30, username: str = Depends(get_current_user)):
+    """获取当前用户的转录历史"""
+    user_tasks = [t for t in tasks.values() if t.get("user") == username]
+    sorted_tasks = sorted(user_tasks, key=lambda t: t.get("created_at", 0), reverse=True)[:limit]
     return [{
         "task_id": t.get("id", "?"), "status": t["status"],
         "url": t.get("url", "?"), "progress": t["progress"],

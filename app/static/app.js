@@ -772,8 +772,12 @@ function switchResultTab(name) {
 
 // ============ 加载历史列表 ============
 async function loadHistory() {
+    if (!isLoggedIn()) {
+        el.taskList.innerHTML = '<div class="empty-state">登录后查看转录历史</div>';
+        return;
+    }
     try {
-        const res = await fetch('/api/tasks?limit=20');
+        const res = await authFetch('/api/tasks?limit=20');
         const tasks = await res.json();
         if (!tasks.length) {
             el.taskList.innerHTML = '<div class="empty-state">暂无历史记录</div>';
